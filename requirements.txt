@@ -1,0 +1,4 @@
+# pyvegas[all]==1.2.*
+gitpython
+python-dotenv
+langchain-google-genai
