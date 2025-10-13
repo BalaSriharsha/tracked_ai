@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from pyvegas.langx.llm import VegasChatLLM
-# from langchain_google_genai import ChatGoogleGenerativeAI
+# from pyvegas.langx.llm import VegasChatLLM
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
 load_dotenv()
@@ -509,16 +509,21 @@ def analyze_ansible_structure() -> str:
 
 @tool
 def create_modification_plan(description: str, file_path: str = "", changes_summary: str = "", new_content: str = "") -> str:
-    """Create a plan for code modifications and request user approval interactively.
+    """Create a plan for code modifications. This prepares the plan but does NOT request approval yet.
+    Approval will be requested when execute_modification_plan is called.
     
     Args:
         description: Description of what needs to be changed
         file_path: Path to the file to modify (optional)
-        changes_summary: Summary of changes to be made (optional)
-        new_content: New content to write if creating/overwriting a file (optional)
+        changes_summary: Summary of changes to be made. For deletions, use keywords like "Deletion of..." (optional)
+        new_content: New content to write if creating/overwriting a file. Use empty string "" for deletions (optional)
     
     Returns:
-        Status message indicating whether the plan was approved or rejected
+        Status message confirming the plan was created
+    
+    Note:
+        For file deletions, set new_content="" and use deletion keywords in changes_summary or description.
+        This tool only PREPARES the plan. Call execute_modification_plan to show the plan, request approval, and execute.
     """
     global PENDING_MODIFICATION_PLAN
     
@@ -536,13 +541,53 @@ def create_modification_plan(description: str, file_path: str = "", changes_summ
         "files_to_modify": files_to_modify,
         "new_content": new_content,
         "target_file": file_path,
-        "instructions": "Review the plan and approve to proceed with modifications."
+        "instructions": "Call execute_modification_plan to show this plan to the user and request approval."
     }
+    
+    # Store the plan (will be shown to user when execute_modification_plan is called)
+    PENDING_MODIFICATION_PLAN = plan
+    
+    return f"Modification plan created successfully. Call execute_modification_plan to show the plan to the user, request approval, and apply the changes."
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """DEPRECATED: Use create_modification_plan + execute_modification_plan instead.
+    
+    This tool bypasses the approval workflow and should NOT be used.
+    For ALL file modifications, use:
+    1. create_modification_plan() to prepare the change
+    2. execute_modification_plan() to show plan, get approval, and execute
+    
+    This ensures consistent user approval for all modifications.
+    """
+    return "ERROR: write_file is deprecated. Use create_modification_plan followed by execute_modification_plan to ensure user approval for all modifications."
+
+@tool
+def execute_modification_plan() -> str:
+    """Show the modification plan to the user, request approval, and execute if approved.
+    
+    This tool handles the complete approval workflow:
+    1. Displays the modification plan
+    2. Asks about branch creation
+    3. Requests user approval
+    4. Creates branch if requested
+    5. Executes the changes (file modifications or deletions)
+    
+    Returns:
+        Status message with results of all operations performed
+    """
+    global PENDING_MODIFICATION_PLAN
+    
+    if PENDING_MODIFICATION_PLAN is None:
+        return "No modification plan found. Create one first using create_modification_plan."
+    
+    plan = PENDING_MODIFICATION_PLAN
     
     # Display the plan in the terminal
     display_modification_plan(plan)
     
     # Ask about branch creation
+    description = plan.get("modification_description", "")
     create_branch, branch_name, change_type = ask_branch_creation(description)
     
     # Store branch info in plan
@@ -553,56 +598,30 @@ def create_modification_plan(description: str, file_path: str = "", changes_summ
     # Request modification approval
     approved = request_user_approval()
     
-    if approved:
-        # Create branch if requested
-        if create_branch:
-            try:
-                repo = Repo(REPO_LOCAL_PATH)
-                current_branch = repo.active_branch.name
-                
-                # Check if branch already exists
-                if branch_name not in [b.name for b in repo.heads]:
-                    new_branch = repo.create_head(branch_name)
-                    new_branch.checkout()
-                    print(f"Created and switched to branch '{branch_name}' from '{current_branch}'\n")
-                else:
-                    print(f"Branch '{branch_name}' already exists. Staying on current branch.\n")
-            except Exception as e:
-                print(f"Warning: Could not create branch: {str(e)}\n")
-        
-        plan["status"] = "approved"
-        PENDING_MODIFICATION_PLAN = plan
-        return f"Modification plan approved! The plan is ready for execution. Use execute_modification_plan to apply the changes."
-    else:
+    if not approved:
+        # User rejected the plan
         plan["status"] = "rejected"
         PENDING_MODIFICATION_PLAN = None
-        return f"Modification plan rejected by user. No changes will be made."
-
-@tool
-def write_file(file_path: str, content: str) -> str:
-    """Write content to a file in the repository. This modifies the actual file."""
-    full_path = Path(REPO_LOCAL_PATH) / file_path
+        return "Modification plan rejected by user. No changes will be made."
     
-    try:
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(content)
-        return f"Successfully wrote to {file_path}"
-    except Exception as e:
-        return f"Error writing to {file_path}: {str(e)}"
-
-@tool
-def execute_modification_plan() -> str:
-    """Execute the approved modification plan. This will make the actual file changes."""
-    global PENDING_MODIFICATION_PLAN
+    # User approved - create branch if requested
+    if create_branch:
+        try:
+            repo = Repo(REPO_LOCAL_PATH)
+            current_branch = repo.active_branch.name
+            
+            # Check if branch already exists
+            if branch_name not in [b.name for b in repo.heads]:
+                new_branch = repo.create_head(branch_name)
+                new_branch.checkout()
+                print(f"Created and switched to branch '{branch_name}' from '{current_branch}'\n")
+            else:
+                print(f"Branch '{branch_name}' already exists. Staying on current branch.\n")
+        except Exception as e:
+            print(f"Warning: Could not create branch: {str(e)}\n")
     
-    if PENDING_MODIFICATION_PLAN is None:
-        return "No modification plan found. Create one first using create_modification_plan."
-    
-    plan = PENDING_MODIFICATION_PLAN
-    
-    if plan.get("status") != "approved":
-        return "Plan is not approved. User must approve the plan first."
+    # Mark as approved and execute
+    plan["status"] = "approved"
     
     results = []
     
@@ -612,7 +631,21 @@ def execute_modification_plan() -> str:
         changes = file_info.get("changes")
         content = file_info.get("content")
         
-        if content:
+        # Check if this is a deletion request
+        is_deletion = content == "" and changes and any(keyword in changes.lower() for keyword in ['delete', 'deletion', 'remove', 'removal'])
+        
+        if is_deletion:
+            # Delete the file
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                if full_path.exists():
+                    full_path.unlink()
+                    results.append(f"Successfully deleted {file_path}")
+                else:
+                    results.append(f"File not found (already deleted): {file_path}")
+            except Exception as e:
+                results.append(f"Error deleting {file_path}: {str(e)}")
+        elif content:
             # Write the new content to the file
             try:
                 full_path = Path(REPO_LOCAL_PATH) / file_path
@@ -626,16 +659,35 @@ def execute_modification_plan() -> str:
             results.append(f"{file_path}: {changes} (no content provided, skipped)")
     
     # Handle new_content (for single file modification)
-    if plan.get("new_content") and plan.get("target_file"):
-        try:
-            file_path = plan["target_file"]
-            full_path = Path(REPO_LOCAL_PATH) / file_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(full_path, 'w') as f:
-                f.write(plan["new_content"])
-            results.append(f"Successfully wrote to {file_path}")
-        except Exception as e:
-            results.append(f"Error writing to {file_path}: {str(e)}")
+    if plan.get("target_file"):
+        file_path = plan["target_file"]
+        new_content = plan.get("new_content", "")
+        description = plan.get("modification_description", "")
+        
+        # Check if this is a deletion request
+        is_deletion = new_content == "" and any(keyword in description.lower() for keyword in ['delete', 'deletion', 'remove', 'removal'])
+        
+        if is_deletion:
+            # Delete the file
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                if full_path.exists():
+                    full_path.unlink()
+                    results.append(f"Successfully deleted {file_path}")
+                else:
+                    results.append(f"File not found (already deleted): {file_path}")
+            except Exception as e:
+                results.append(f"Error deleting {file_path}: {str(e)}")
+        elif new_content:
+            # Write the new content
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(full_path, 'w') as f:
+                    f.write(new_content)
+                results.append(f"Successfully wrote to {file_path}")
+            except Exception as e:
+                results.append(f"Error writing to {file_path}: {str(e)}")
     
     # Clear the pending plan after execution
     PENDING_MODIFICATION_PLAN = None
@@ -1000,6 +1052,9 @@ STEP 2 - PLAN THE APPROACH:
 - Start with discovery (analyze_ansible_structure, find_relevant_files)
 - Then narrow down (grep_search, search_in_files)
 - Finally read specific content (get_file_summary, read_file)
+- For modifications: ALWAYS plan TWO steps:
+  1) create_modification_plan (for approval)
+  2) execute_modification_plan (to apply changes)
 
 STEP 3 - ESTIMATE SCOPE:
 - How many files will I likely need to examine?
@@ -1022,10 +1077,10 @@ Ansible Tools:
 - search_in_files: Simple text search (returns matching lines only)
 - read_file: Read full file or line range
 
-Modification Tools:
-- create_modification_plan: Plan code changes and request user approval (USE THIS for all modifications)
-- execute_modification_plan: Execute approved modifications
-- write_file: Direct file write (use only for new files or when modification_plan is not suitable)
+Modification Tools (ALWAYS use these TWO tools in sequence):
+- create_modification_plan: Prepare modification plan (stores plan, does NOT request approval yet)
+- execute_modification_plan: Show plan to user, request approval, and execute changes (ATOMIC operation)
+- write_file: DEPRECATED - Do NOT use this tool
 
 Git Tools:
 - git_fetch_all: Fetch latest changes from remote (automatically done at start)
@@ -1043,11 +1098,25 @@ Ansible Content Analysis Tools:
 - extract_ansible_variables: Extract variables defined and used in playbooks/roles
 - analyze_role_structure: Analyze role structure including tasks, handlers, vars, dependencies
 
-IMPORTANT: When the user asks for changes to existing files:
-1. First, read the file to understand its current content
-2. Use create_modification_plan to show the proposed changes and get approval
-3. The user will be asked if they want to create a new branch for the changes
-4. After approval, use execute_modification_plan to apply the changes
+CRITICAL MODIFICATION WORKFLOW - FOLLOW THESE STEPS IN ORDER:
+When ANY file modification is requested, you MUST execute ALL these steps:
+
+Step 1: Read the file (use read_file) if modifying existing content
+Step 2: Call create_modification_plan with complete new_content (this PREPARES the plan, NO approval yet)
+Step 3: IMMEDIATELY call execute_modification_plan (this shows plan, requests approval, and executes)
+
+THE APPROVAL WORKFLOW:
+- create_modification_plan: Stores the plan (NO user interaction)
+- execute_modification_plan: Shows plan → asks for branch → requests approval → executes (ALL in one atomic operation)
+
+This ensures approval happens EXACTLY ONCE, right before execution.
+
+YOU MUST CALL BOTH TOOLS IN SEQUENCE:
+1. create_modification_plan (prepares the plan)
+2. execute_modification_plan (handles approval and execution)
+
+If you only call create_modification_plan, the file is NOT modified!
+NEVER use write_file - it is deprecated and bypasses approval.
 
 NOTE: Git fetch and sync happen automatically at the start of each query.
 
@@ -1062,11 +1131,20 @@ Execute the planned steps efficiently:
 - Focus on relevant information
 - Provide clear, concise responses
 
-For file modifications:
-- Always use create_modification_plan to get user approval before making changes
-- The user will be asked if they want to create a new branch for the changes
-- After approval, use execute_modification_plan to apply changes
-- The user will be prompted in the terminal to approve/reject changes
+MANDATORY FILE MODIFICATION RULES:
+1. For ANY file change, you MUST call BOTH tools in sequence:
+   a) create_modification_plan (prepares the plan, NO user interaction)
+   b) execute_modification_plan (shows plan, requests approval, executes - ATOMIC operation)
+
+2. Approval happens INSIDE execute_modification_plan, NOT in create_modification_plan
+   - This ensures approval happens EXACTLY ONCE, right before execution
+   - No matter how many times you call create_modification_plan, approval only happens once
+
+3. The file is NOT modified until execute_modification_plan is called and user approves
+
+4. NEVER use write_file - it is DEPRECATED and bypasses approval
+
+5. NEVER claim changes are complete after only calling create_modification_plan
 
 Git workflow:
 - Git fetch and sync happen automatically at the start of each query
@@ -1114,19 +1192,19 @@ TOOLS = [
 def create_ansible_agent():
     """Create and return the Ansible Chain of Thought agent."""
     # Use lower temperature for more focused, context-based responses
-    llm = VegasChatLLM(
-        usecase_name=os.getenv("VEGAS_USECASE_NAME", "AnsibleCodingAgent"),
-        context_name=os.getenv("VEGAS_CONTEXT_NAME", "AnsibleCodeContext"),
-        temperature=0.2,  # Lower temperature for consistent, factual responses
-    )
+    # llm = VegasChatLLM(
+    #     usecase_name=os.getenv("VEGAS_USECASE_NAME", "AnsibleCodingAgent"),
+    #     context_name=os.getenv("VEGAS_CONTEXT_NAME", "AnsibleCodeContext"),
+    #     temperature=0.2,  # Lower temperature for consistent, factual responses
+    # )
 
     # Configure LLM with Google Gemini
-    # llm = ChatGoogleGenerativeAI(
-    #     model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-    #     google_api_key=os.getenv("GOOGLE_API_KEY"),
-    #     temperature=0.2,
-    #     convert_system_message_to_human=True
-    # )
+    llm = ChatGoogleGenerativeAI(
+        model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        temperature=0.2,
+        convert_system_message_to_human=True
+    )
     
     # Bind tools to LLM
     llm_with_tools = llm.bind_tools(TOOLS)
@@ -1277,8 +1355,30 @@ Be specific about which tools to use in each step.""")
         print_thinking(f"Step: {current_step_text}", "STEP")
         print_thinking("Determining which tools to use...", "THINKING")
         
-        # Create concise execution prompt for this specific step
-        step_prompt = HumanMessage(content=f"""Execute this step from the plan. Be CONCISE in your response.
+        # Detect if tools are mentioned in the step
+        tool_names = [tool.name for tool in TOOLS]
+        mentioned_tools = [name for name in tool_names if name in current_step_text.lower().replace('_', ' ') or name in current_step_text]
+        
+        # Create execution prompt with strong tool enforcement
+        if mentioned_tools:
+            tool_list = ", ".join(mentioned_tools)
+            step_prompt = HumanMessage(content=f"""EXECUTE THIS STEP EXACTLY AS DESCRIBED.
+
+Original Query: {original_query}
+
+Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
+
+Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
+
+CRITICAL: This step mentions these tools: {tool_list}
+You MUST call the tools mentioned in the step description.
+If the step says "call create_modification_plan", you MUST call create_modification_plan.
+If the step says "call execute_modification_plan", you MUST call execute_modification_plan.
+DO NOT say "No tools needed" - the step explicitly requires tool calls.
+
+Execute this step NOW by calling the appropriate tools.""")
+        else:
+            step_prompt = HumanMessage(content=f"""Execute this step from the plan. Be CONCISE in your response.
 
 Original Query: {original_query}
 
@@ -1354,10 +1454,53 @@ Execute this step now. Use only the necessary tools. Keep your response brief an
         # Create a summary of what was done
         summary = "\n".join([f"Step {r['step']}: {r['action']}" for r in step_results])
         
+        # Check if this was a modification request
+        modification_keywords = ['add', 'modify', 'change', 'update', 'remove', 'delete', 'create', 'write']
+        is_modification_request = any(keyword in original_query.lower() for keyword in modification_keywords)
+        
+        # Check if both modification tools were called
+        messages = state["messages"]
+        modification_plan_called = any(
+            hasattr(msg, 'tool_calls') and msg.tool_calls and 
+            any(tc.get('name') == 'create_modification_plan' for tc in msg.tool_calls)
+            for msg in messages if hasattr(msg, 'tool_calls')
+        )
+        
+        execute_plan_called = any(
+            hasattr(msg, 'tool_calls') and msg.tool_calls and 
+            any(tc.get('name') == 'execute_modification_plan' for tc in msg.tool_calls)
+            for msg in messages if hasattr(msg, 'tool_calls')
+        )
+        
         print_thinking("Creating final response for user...", "THINKING")
         
-        # Ask LLM to synthesize the answer concisely
-        final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+        # Build the final prompt with modification check
+        if is_modification_request and not modification_plan_called:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+
+Original Query: {original_query}
+
+Steps Executed:
+{summary}
+
+IMPORTANT: This was a file modification request, but create_modification_plan was NOT called during execution.
+You MUST tell the user that the modification was NOT completed because the approval workflow was not followed.
+Explain that they need to run the request again and ensure BOTH create_modification_plan AND execute_modification_plan are called.""")
+        elif is_modification_request and modification_plan_called and not execute_plan_called:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+
+Original Query: {original_query}
+
+Steps Executed:
+{summary}
+
+CRITICAL: The modification was NOT completed! 
+While create_modification_plan was called and approved, execute_modification_plan was NEVER called.
+The file was NOT actually modified.
+You MUST tell the user that the changes were NOT applied because execute_modification_plan was not called.
+The workflow requires BOTH tools: create_modification_plan (approval) AND execute_modification_plan (actual modification).""")
+        else:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
 
 Original Query: {original_query}
 
