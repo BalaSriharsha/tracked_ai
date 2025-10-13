@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-# from pyvegas.langx.llm import VegasChatLLM
-from langchain_google_genai import ChatGoogleGenerativeAI
+from pyvegas.langx.llm import VegasChatLLM
+# from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
 load_dotenv()
@@ -1192,19 +1192,17 @@ TOOLS = [
 def create_ansible_agent():
     """Create and return the Ansible Chain of Thought agent."""
     # Use lower temperature for more focused, context-based responses
-    # llm = VegasChatLLM(
-    #     usecase_name=os.getenv("VEGAS_USECASE_NAME", "AnsibleCodingAgent"),
-    #     context_name=os.getenv("VEGAS_CONTEXT_NAME", "AnsibleCodeContext"),
-    #     temperature=0.2,  # Lower temperature for consistent, factual responses
-    # )
+    llm = VegasChatLLM(
+        prompt_id = "ANSIBLE_AGENT_PROMPT"
+    )
 
     # Configure LLM with Google Gemini
-    llm = ChatGoogleGenerativeAI(
-        model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.2,
-        convert_system_message_to_human=True
-    )
+    # llm = ChatGoogleGenerativeAI(
+    #     model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+    #     google_api_key=os.getenv("GOOGLE_API_KEY"),
+    #     temperature=0.2,
+    #     convert_system_message_to_human=True
+    # )
     
     # Bind tools to LLM
     llm_with_tools = llm.bind_tools(TOOLS)
