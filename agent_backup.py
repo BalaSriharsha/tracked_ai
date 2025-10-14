@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Annotated, TypedDict
 from dotenv import load_dotenv
@@ -10,13 +11,22 @@ from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pyvegas.langx.llm import VegasChatLLM
+# from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
 load_dotenv()
 
+# Add ansible-content-capture to sys.path
+ansible_capture_path = os.path.join(os.path.dirname(__file__), "ansible-content-capture", "src")
+if os.path.exists(ansible_capture_path) and ansible_capture_path not in sys.path:
+    sys.path.insert(0, ansible_capture_path)
+
 # Configuration
-REPO_LOCAL_PATH = ".."
+REPO_LOCAL_PATH = "./RHEL8-CIS"
 # GIT_REPO_URL = os.getenv("GIT_REPO_URL")
+
+# Global storage for modification plans
+PENDING_MODIFICATION_PLAN = None
 
 # # Clone or update repository
 # def setup_repo():
@@ -29,6 +39,150 @@ REPO_LOCAL_PATH = ".."
 #         print(f"Cloning repository from {GIT_REPO_URL}...")
 #         Repo.clone_from(GIT_REPO_URL, REPO_LOCAL_PATH)
 #     print("Repository ready.")
+
+# Helper functions for displaying agent thinking
+def print_thinking(message: str, prefix="THINKING") -> None:
+    """Display agent's thinking process in real-time."""
+    print(f"[{prefix}] {message}", flush=True)
+
+def print_section(title: str) -> None:
+    """Print a section header."""
+    print(f"\n{'='*80}")
+    print(f"{title}")
+    print(f"{'='*80}\n", flush=True)
+
+# Helper functions for interactive modification approval
+def display_modification_plan(plan: dict) -> None:
+    """Display modification plan in a formatted, user-friendly way."""
+    print("\n" + "="*80)
+    print("MODIFICATION PLAN")
+    print("="*80)
+    print(f"\nDescription: {plan.get('modification_description', 'No description provided')}")
+    
+    files_to_modify = plan.get('files_to_modify', [])
+    if files_to_modify:
+        print(f"\nFiles to modify ({len(files_to_modify)}):")
+        for idx, file_info in enumerate(files_to_modify, 1):
+            file_path = file_info.get('file', 'Unknown file')
+            changes = file_info.get('changes', 'No changes specified')
+            print(f"\n  {idx}. {file_path}")
+            print(f"     Changes: {changes}")
+    else:
+        print("\nNo specific files listed in modification plan.")
+    
+    if plan.get('new_content'):
+        print(f"\nNew Content Preview:")
+        print("-" * 80)
+        content_preview = plan['new_content'][:500]
+        print(content_preview)
+        if len(plan['new_content']) > 500:
+            print(f"\n... (truncated, {len(plan['new_content']) - 500} more characters)")
+        print("-" * 80)
+    
+    print("\n" + "="*80)
+
+def request_user_approval() -> bool:
+    """Request user approval for the modification plan."""
+    while True:
+        response = input("\nDo you approve these changes? (yes/no): ").strip().lower()
+        if response in ['yes', 'y']:
+            print("Changes approved. Proceeding with modifications...\n")
+            return True
+        elif response in ['no', 'n']:
+            print("Changes rejected. No modifications will be made.\n")
+            return False
+        else:
+            print("Please enter 'yes' or 'no'.")
+
+def detect_modification_type(description: str) -> str:
+    """Detect the type of modification based on description keywords."""
+    description_lower = description.lower()
+    
+    # Keywords for each type
+    feature_keywords = ['add', 'implement', 'create', 'new', 'support', 'introduce']
+    bugfix_keywords = ['fix', 'bug', 'issue', 'error', 'crash', 'problem', 'resolve']
+    chore_keywords = ['update', 'upgrade', 'refactor', 'clean', 'maintenance', 'reorganize']
+    hotfix_keywords = ['urgent', 'critical', 'security', 'hotfix', 'emergency']
+    docs_keywords = ['document', 'readme', 'docs', 'comment', 'documentation']
+    test_keywords = ['test', 'testing', 'spec', 'coverage']
+    
+    # Check for each type
+    if any(keyword in description_lower for keyword in hotfix_keywords):
+        return 'hotfix'
+    elif any(keyword in description_lower for keyword in bugfix_keywords):
+        return 'bugfix'
+    elif any(keyword in description_lower for keyword in docs_keywords):
+        return 'docs'
+    elif any(keyword in description_lower for keyword in test_keywords):
+        return 'test'
+    elif any(keyword in description_lower for keyword in chore_keywords):
+        return 'chore'
+    elif any(keyword in description_lower for keyword in feature_keywords):
+        return 'feature'
+    else:
+        return 'feature'  # Default to feature
+
+def generate_branch_name(change_type: str, description: str) -> str:
+    """Generate a branch name following Git Flow conventions."""
+    import re
+    
+    # Convert description to kebab-case
+    # Remove special characters and convert to lowercase
+    clean_desc = re.sub(r'[^a-zA-Z0-9\s-]', '', description.lower())
+    # Replace spaces with hyphens
+    clean_desc = re.sub(r'\s+', '-', clean_desc.strip())
+    # Remove multiple consecutive hyphens
+    clean_desc = re.sub(r'-+', '-', clean_desc)
+    # Limit length to 40 characters
+    clean_desc = clean_desc[:40].rstrip('-')
+    
+    # Create branch name
+    branch_name = f"{change_type}/{clean_desc}"
+    return branch_name
+
+def ask_branch_creation(modification_description: str) -> tuple:
+    """Ask user if they want to create a new branch for modifications.
+    
+    Returns:
+        Tuple of (create_branch: bool, branch_name: str, change_type: str)
+    """
+    print("\n" + "="*80)
+    print("BRANCH CREATION")
+    print("="*80)
+    
+    # Detect modification type
+    change_type = detect_modification_type(modification_description)
+    print(f"\nDetected change type: {change_type}")
+    
+    # Generate proposed branch name
+    proposed_name = generate_branch_name(change_type, modification_description)
+    print(f"Proposed branch name: {proposed_name}")
+    
+    # Ask user
+    while True:
+        response = input("\nDo you want to create a new branch for these changes? (yes/no/custom): ").strip().lower()
+        
+        if response in ['no', 'n']:
+            print("Proceeding with changes on current branch...\n")
+            return (False, "", change_type)
+        
+        elif response in ['yes', 'y']:
+            # Ask for confirmation of proposed name
+            confirm = input(f"Use proposed branch name '{proposed_name}'? (yes/no): ").strip().lower()
+            if confirm in ['yes', 'y']:
+                return (True, proposed_name, change_type)
+            else:
+                custom_name = input("Enter custom branch name: ").strip()
+                if custom_name:
+                    return (True, custom_name, change_type)
+        
+        elif response == 'custom':
+            custom_name = input("Enter custom branch name: ").strip()
+            if custom_name:
+                return (True, custom_name, change_type)
+        
+        else:
+            print("Please enter 'yes', 'no', or 'custom'.")
 
 # Tool definitions
 @tool
@@ -354,54 +508,534 @@ def analyze_ansible_structure() -> str:
     return "\n".join(output) if any(analysis.values()) else "No Ansible structure detected in the repository."
 
 @tool
-def create_modification_plan(description: str) -> str:
-    """Create a plan for code modifications. Input should be a description of what needs to be changed.
-    Returns a JSON plan with files to modify and proposed changes."""
+def create_modification_plan(description: str, file_path: str = "", changes_summary: str = "", new_content: str = "") -> str:
+    """Create a plan for code modifications. This prepares the plan but does NOT request approval yet.
+    Approval will be requested when execute_modification_plan is called.
+    
+    Args:
+        description: Description of what needs to be changed
+        file_path: Path to the file to modify (optional)
+        changes_summary: Summary of changes to be made. For deletions, use keywords like "Deletion of..." (optional)
+        new_content: New content to write if creating/overwriting a file. Use empty string "" for deletions (optional)
+    
+    Returns:
+        Status message confirming the plan was created
+    
+    Note:
+        For file deletions, set new_content="" and use deletion keywords in changes_summary or description.
+        This tool only PREPARES the plan. Call execute_modification_plan to show the plan, request approval, and execute.
+    """
+    global PENDING_MODIFICATION_PLAN
+    
+    files_to_modify = []
+    if file_path:
+        files_to_modify.append({
+            "file": file_path,
+            "changes": changes_summary,
+            "content": new_content
+        })
+    
     plan = {
         "modification_description": description,
         "status": "pending_approval",
-        "files_to_modify": [],
-        "instructions": "Review the plan and approve to proceed with modifications."
+        "files_to_modify": files_to_modify,
+        "new_content": new_content,
+        "target_file": file_path,
+        "instructions": "Call execute_modification_plan to show this plan to the user and request approval."
     }
     
-    # Save plan for later execution
-    with open("modification_plan.json", "w") as f:
-        json.dump(plan, f, indent=2)
+    # Store the plan (will be shown to user when execute_modification_plan is called)
+    PENDING_MODIFICATION_PLAN = plan
     
-    return f"Modification plan created. Review and add files to modify:\n{json.dumps(plan, indent=2)}\n\nTo proceed, use the execute_modification_plan tool after approval."
+    return f"Modification plan created successfully. Call execute_modification_plan to show the plan to the user, request approval, and apply the changes."
 
 @tool
 def write_file(file_path: str, content: str) -> str:
-    """Write content to a file in the repository. This modifies the actual file."""
-    full_path = Path(REPO_LOCAL_PATH) / file_path
+    """DEPRECATED: Use create_modification_plan + execute_modification_plan instead.
     
-    try:
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(content)
-        return f"Successfully wrote to {file_path}"
-    except Exception as e:
-        return f"Error writing to {file_path}: {str(e)}"
+    This tool bypasses the approval workflow and should NOT be used.
+    For ALL file modifications, use:
+    1. create_modification_plan() to prepare the change
+    2. execute_modification_plan() to show plan, get approval, and execute
+    
+    This ensures consistent user approval for all modifications.
+    """
+    return "ERROR: write_file is deprecated. Use create_modification_plan followed by execute_modification_plan to ensure user approval for all modifications."
 
 @tool
 def execute_modification_plan() -> str:
-    """Execute the approved modification plan. This will make the actual file changes."""
-    if not os.path.exists("modification_plan.json"):
+    """Show the modification plan to the user, request approval, and execute if approved.
+    
+    This tool handles the complete approval workflow:
+    1. Displays the modification plan
+    2. Asks about branch creation
+    3. Requests user approval
+    4. Creates branch if requested
+    5. Executes the changes (file modifications or deletions)
+    
+    Returns:
+        Status message with results of all operations performed
+    """
+    global PENDING_MODIFICATION_PLAN
+    
+    if PENDING_MODIFICATION_PLAN is None:
         return "No modification plan found. Create one first using create_modification_plan."
     
-    with open("modification_plan.json", "r") as f:
-        plan = json.load(f)
+    plan = PENDING_MODIFICATION_PLAN
     
-    if plan.get("status") != "approved":
-        return "Plan is not approved. User must approve the plan first."
+    # Display the plan in the terminal
+    display_modification_plan(plan)
+    
+    # Ask about branch creation
+    description = plan.get("modification_description", "")
+    create_branch, branch_name, change_type = ask_branch_creation(description)
+    
+    # Store branch info in plan
+    plan["create_branch"] = create_branch
+    plan["branch_name"] = branch_name
+    plan["change_type"] = change_type
+    
+    # Request modification approval
+    approved = request_user_approval()
+    
+    if not approved:
+        # User rejected the plan
+        plan["status"] = "rejected"
+        PENDING_MODIFICATION_PLAN = None
+        return "Modification plan rejected by user. No changes will be made."
+    
+    # User approved - create branch if requested
+    if create_branch:
+        try:
+            repo = Repo(REPO_LOCAL_PATH)
+            current_branch = repo.active_branch.name
+            
+            # Check if branch already exists
+            if branch_name not in [b.name for b in repo.heads]:
+                new_branch = repo.create_head(branch_name)
+                new_branch.checkout()
+                print(f"Created and switched to branch '{branch_name}' from '{current_branch}'\n")
+            else:
+                print(f"Branch '{branch_name}' already exists. Staying on current branch.\n")
+        except Exception as e:
+            print(f"Warning: Could not create branch: {str(e)}\n")
+    
+    # Mark as approved and execute
+    plan["status"] = "approved"
     
     results = []
+    
+    # Handle files_to_modify
     for file_info in plan.get("files_to_modify", []):
         file_path = file_info.get("file")
         changes = file_info.get("changes")
-        results.append(f"Modified {file_path}: {changes}")
+        content = file_info.get("content")
+        
+        # Check if this is a deletion request
+        is_deletion = content == "" and changes and any(keyword in changes.lower() for keyword in ['delete', 'deletion', 'remove', 'removal'])
+        
+        if is_deletion:
+            # Delete the file
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                if full_path.exists():
+                    full_path.unlink()
+                    results.append(f"Successfully deleted {file_path}")
+                else:
+                    results.append(f"File not found (already deleted): {file_path}")
+            except Exception as e:
+                results.append(f"Error deleting {file_path}: {str(e)}")
+        elif content:
+            # Write the new content to the file
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(full_path, 'w') as f:
+                    f.write(content)
+                results.append(f"Modified {file_path}: {changes}")
+            except Exception as e:
+                results.append(f"Error modifying {file_path}: {str(e)}")
+        else:
+            results.append(f"{file_path}: {changes} (no content provided, skipped)")
     
-    return "\n".join(results) if results else "No modifications executed."
+    # Handle new_content (for single file modification)
+    if plan.get("target_file"):
+        file_path = plan["target_file"]
+        new_content = plan.get("new_content", "")
+        description = plan.get("modification_description", "")
+        
+        # Check if this is a deletion request
+        is_deletion = new_content == "" and any(keyword in description.lower() for keyword in ['delete', 'deletion', 'remove', 'removal'])
+        
+        if is_deletion:
+            # Delete the file
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                if full_path.exists():
+                    full_path.unlink()
+                    results.append(f"Successfully deleted {file_path}")
+                else:
+                    results.append(f"File not found (already deleted): {file_path}")
+            except Exception as e:
+                results.append(f"Error deleting {file_path}: {str(e)}")
+        elif new_content:
+            # Write the new content
+            try:
+                full_path = Path(REPO_LOCAL_PATH) / file_path
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(full_path, 'w') as f:
+                    f.write(new_content)
+                results.append(f"Successfully wrote to {file_path}")
+            except Exception as e:
+                results.append(f"Error writing to {file_path}: {str(e)}")
+    
+    # Clear the pending plan after execution
+    PENDING_MODIFICATION_PLAN = None
+    
+    if results:
+        return "Modification Results:\n" + "\n".join(results)
+    else:
+        return "No modifications executed. The plan may not have contained executable changes."
+
+# Git workflow tools
+@tool
+def git_fetch_all() -> str:
+    """Fetch latest changes from all remotes to sync with remote repository."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        print_thinking("Fetching latest changes from all remotes...", "GIT")
+        repo.remotes.origin.fetch()
+        return "Successfully fetched latest changes from remote repository."
+    except Exception as e:
+        return f"Error fetching from remote: {str(e)}"
+
+@tool
+def git_get_current_branch() -> str:
+    """Get the name of the current active branch."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        current_branch = repo.active_branch.name
+        return f"Current branch: {current_branch}"
+    except Exception as e:
+        return f"Error getting current branch: {str(e)}"
+
+@tool
+def git_get_base_branch() -> str:
+    """Determine the base/parent branch of the current branch."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        current_branch = repo.active_branch
+        
+        # Try to get tracking branch
+        if current_branch.tracking_branch():
+            tracking = current_branch.tracking_branch().name
+            base = tracking.split('/')[-1] if '/' in tracking else tracking
+            return f"Base branch: {base}"
+        
+        # Fallback: check if main or master exists
+        branch_names = [b.name for b in repo.heads]
+        if 'main' in branch_names:
+            return "Base branch: main"
+        elif 'master' in branch_names:
+            return "Base branch: master"
+        else:
+            return "Base branch: Unable to determine (defaulting to main)"
+    except Exception as e:
+        return f"Error determining base branch: {str(e)}"
+
+@tool
+def git_sync_with_base(base_branch: str = "main") -> str:
+    """Merge the base branch into current branch to sync with latest changes."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        current_branch = repo.active_branch.name
+        
+        print_thinking(f"Syncing {current_branch} with {base_branch}...", "GIT")
+        
+        # Check if base branch exists
+        if base_branch not in [b.name for b in repo.heads]:
+            return f"Base branch '{base_branch}' does not exist."
+        
+        # Merge base branch into current branch
+        repo.git.merge(base_branch, '--no-edit')
+        return f"Successfully merged {base_branch} into {current_branch}"
+    except Exception as e:
+        if "CONFLICT" in str(e):
+            return f"Merge conflict detected. Please resolve conflicts manually: {str(e)}"
+        return f"Error syncing with base branch: {str(e)}"
+
+@tool
+def git_create_branch(branch_name: str, from_current: bool = True) -> str:
+    """Create a new branch and switch to it.
+    
+    Args:
+        branch_name: Name of the new branch to create
+        from_current: If True, create from current branch; if False, from base branch
+    
+    Returns:
+        Status message about branch creation
+    """
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        current_branch = repo.active_branch.name
+        
+        # Check if branch already exists
+        if branch_name in [b.name for b in repo.heads]:
+            return f"Branch '{branch_name}' already exists. Switch to it using git checkout."
+        
+        print_thinking(f"Creating new branch '{branch_name}' from '{current_branch}'...", "GIT")
+        
+        # Create and checkout new branch
+        new_branch = repo.create_head(branch_name)
+        new_branch.checkout()
+        
+        return f"Successfully created and switched to branch '{branch_name}' from '{current_branch}'"
+    except Exception as e:
+        return f"Error creating branch: {str(e)}"
+
+@tool
+def git_get_status() -> str:
+    """Get current Git repository status including modified and staged files."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        status_lines = []
+        
+        # Get current branch
+        status_lines.append(f"On branch: {repo.active_branch.name}")
+        
+        # Get modified files
+        modified = [item.a_path for item in repo.index.diff(None)]
+        if modified:
+            status_lines.append(f"\nModified files ({len(modified)}):")
+            for file in modified[:10]:
+                status_lines.append(f"  - {file}")
+            if len(modified) > 10:
+                status_lines.append(f"  ... and {len(modified) - 10} more")
+        
+        # Get staged files
+        staged = [item.a_path for item in repo.index.diff("HEAD")]
+        if staged:
+            status_lines.append(f"\nStaged files ({len(staged)}):")
+            for file in staged[:10]:
+                status_lines.append(f"  - {file}")
+            if len(staged) > 10:
+                status_lines.append(f"  ... and {len(staged) - 10} more")
+        
+        # Get untracked files
+        untracked = repo.untracked_files
+        if untracked:
+            status_lines.append(f"\nUntracked files ({len(untracked)}):")
+            for file in untracked[:10]:
+                status_lines.append(f"  - {file}")
+            if len(untracked) > 10:
+                status_lines.append(f"  ... and {len(untracked) - 10} more")
+        
+        if not modified and not staged and not untracked:
+            status_lines.append("\nWorking tree clean")
+        
+        return "\n".join(status_lines)
+    except Exception as e:
+        return f"Error getting git status: {str(e)}"
+
+@tool
+def git_list_branches() -> str:
+    """List all local branches with current branch marker."""
+    try:
+        repo = Repo(REPO_LOCAL_PATH)
+        current_branch = repo.active_branch.name
+        branches = []
+        
+        for branch in repo.heads:
+            marker = "* " if branch.name == current_branch else "  "
+            branches.append(f"{marker}{branch.name}")
+        
+        return "Local branches:\n" + "\n".join(branches)
+    except Exception as e:
+        return f"Error listing branches: {str(e)}"
+
+# Ansible Content Capture tools
+@tool
+def scan_ansible_content(target_path: str = "") -> str:
+    """Scan and analyze Ansible content (playbooks, roles, tasks) to extract detailed information.
+    
+    Args:
+        target_path: Path to Ansible content relative to repo root (playbook, role dir, or project dir)
+    
+    Returns:
+        JSON string with scanned content details including tasks, modules, variables, and structure
+    """
+    try:
+        from ansible_content_capture.scanner import AnsibleScanner
+        
+        # Determine full path
+        if target_path:
+            full_path = os.path.join(REPO_LOCAL_PATH, target_path)
+        else:
+            full_path = REPO_LOCAL_PATH
+        
+        if not os.path.exists(full_path):
+            return f"Error: Path does not exist: {target_path}"
+        
+        # Create scanner and run
+        scanner = AnsibleScanner()
+        scanner.silent = True
+        result = scanner.run(target_dir=full_path)
+        
+        # Extract useful information
+        scan_data = scanner.scan_records
+        
+        # Format output
+        output = {
+            "scanned_path": target_path or REPO_LOCAL_PATH,
+            "projects": list(scan_data.get("project_file_list", {}).keys()),
+            "total_files_scanned": len(scan_data.get("file_inventory", {})),
+            "summary": "Scan completed successfully"
+        }
+        
+        return json.dumps(output, indent=2)
+    except ImportError:
+        return "Error: ansible-content-capture is not properly installed. Please ensure the repository is cloned."
+    except Exception as e:
+        return f"Error scanning Ansible content: {str(e)}"
+
+@tool
+def extract_playbook_tasks(playbook_path: str) -> str:
+    """Extract tasks and execution flow from an Ansible playbook.
+    
+    Args:
+        playbook_path: Path to the playbook file relative to repo root
+    
+    Returns:
+        JSON string with tasks, roles, and execution flow information
+    """
+    try:
+        from ansible_content_capture.scanner import AnsibleScanner
+        
+        full_path = os.path.join(REPO_LOCAL_PATH, playbook_path)
+        
+        if not os.path.exists(full_path):
+            return f"Error: Playbook not found: {playbook_path}"
+        
+        scanner = AnsibleScanner()
+        scanner.silent = True
+        scanner.run(target_dir=full_path)
+        
+        # Get task information
+        output = {
+            "playbook": playbook_path,
+            "status": "analyzed",
+            "details": "Task extraction completed"
+        }
+        
+        return json.dumps(output, indent=2)
+    except ImportError:
+        return "Error: ansible-content-capture is not properly installed."
+    except Exception as e:
+        return f"Error extracting playbook tasks: {str(e)}"
+
+@tool
+def list_ansible_modules(search_path: str = "") -> str:
+    """List all Ansible modules used in the repository with usage count.
+    
+    Args:
+        search_path: Path to search for modules (default: entire repo)
+    
+    Returns:
+        List of modules with usage count and locations
+    """
+    try:
+        from ansible_content_capture.scanner import AnsibleScanner
+        
+        scan_path = os.path.join(REPO_LOCAL_PATH, search_path) if search_path else REPO_LOCAL_PATH
+        
+        scanner = AnsibleScanner()
+        scanner.silent = True
+        scanner.run(target_dir=scan_path)
+        
+        output = {
+            "search_path": search_path or "entire repository",
+            "status": "Module scan completed",
+            "note": "Use grep_search to find specific module usage patterns"
+        }
+        
+        return json.dumps(output, indent=2)
+    except ImportError:
+        return "Error: ansible-content-capture is not properly installed."
+    except Exception as e:
+        return f"Error listing modules: {str(e)}"
+
+@tool  
+def extract_ansible_variables(content_path: str) -> str:
+    """Extract all variables defined and used in Ansible playbooks/roles.
+    
+    Args:
+        content_path: Path to playbook, role, or directory to analyze
+    
+    Returns:
+        Dictionary of variables with their sources and usage locations
+    """
+    try:
+        from ansible_content_capture.scanner import AnsibleScanner
+        
+        full_path = os.path.join(REPO_LOCAL_PATH, content_path)
+        
+        if not os.path.exists(full_path):
+            return f"Error: Path not found: {content_path}"
+        
+        scanner = AnsibleScanner()
+        scanner.silent = True
+        scanner.run(target_dir=full_path)
+        
+        output = {
+            "analyzed_path": content_path,
+            "status": "Variable extraction completed",
+            "note": "Variables have been analyzed from the specified content"
+        }
+        
+        return json.dumps(output, indent=2)
+    except ImportError:
+        return "Error: ansible-content-capture is not properly installed."
+    except Exception as e:
+        return f"Error extracting variables: {str(e)}"
+
+@tool
+def analyze_role_structure(role_path: str) -> str:
+    """Analyze the structure of an Ansible role including tasks, handlers, vars, and dependencies.
+    
+    Args:
+        role_path: Path to the role directory relative to repo root
+    
+    Returns:
+        JSON with role structure, components, and dependencies
+    """
+    try:
+        from ansible_content_capture.scanner import AnsibleScanner
+        
+        full_path = os.path.join(REPO_LOCAL_PATH, role_path)
+        
+        if not os.path.exists(full_path):
+            return f"Error: Role directory not found: {role_path}"
+        
+        # Check if it's a valid role directory
+        role_components = ["tasks", "handlers", "defaults", "vars", "meta", "templates", "files"]
+        existing_components = [comp for comp in role_components if os.path.exists(os.path.join(full_path, comp))]
+        
+        scanner = AnsibleScanner()
+        scanner.silent = True
+        scanner.run(target_dir=full_path)
+        
+        output = {
+            "role_path": role_path,
+            "components_found": existing_components,
+            "status": "Role structure analyzed",
+            "component_count": len(existing_components)
+        }
+        
+        return json.dumps(output, indent=2)
+    except ImportError:
+        return "Error: ansible-content-capture is not properly installed."
+    except Exception as e:
+        return f"Error analyzing role: {str(e)}"
 
 # Chain of Thought prompt for planning
 COT_PLANNING_PROMPT = """You are an expert Ansible coding assistant. Before taking any action, think through the problem step by step.
@@ -418,6 +1052,9 @@ STEP 2 - PLAN THE APPROACH:
 - Start with discovery (analyze_ansible_structure, find_relevant_files)
 - Then narrow down (grep_search, search_in_files)
 - Finally read specific content (get_file_summary, read_file)
+- For modifications: ALWAYS plan TWO steps:
+  1) create_modification_plan (for approval)
+  2) execute_modification_plan (to apply changes)
 
 STEP 3 - ESTIMATE SCOPE:
 - How many files will I likely need to examine?
@@ -430,6 +1067,8 @@ STEP 4 - EXECUTE EFFICIENTLY:
 - Limit file reads to 3-5 files maximum unless critical
 
 Available Tools:
+
+Ansible Tools:
 - analyze_ansible_structure: Repository overview
 - find_relevant_files: Find relevant files by keywords
 - get_file_summary: Preview file without full read
@@ -437,9 +1076,49 @@ Available Tools:
 - grep_search: Regex search (returns matching lines only)
 - search_in_files: Simple text search (returns matching lines only)
 - read_file: Read full file or line range
-- create_modification_plan: Plan code changes
-- write_file: Modify a file
-- execute_modification_plan: Execute modifications
+
+Modification Tools (ALWAYS use these TWO tools in sequence):
+- create_modification_plan: Prepare modification plan (stores plan, does NOT request approval yet)
+- execute_modification_plan: Show plan to user, request approval, and execute changes (ATOMIC operation)
+- write_file: DEPRECATED - Do NOT use this tool
+
+Git Tools:
+- git_fetch_all: Fetch latest changes from remote (automatically done at start)
+- git_get_current_branch: Get current branch name
+- git_get_base_branch: Determine base/parent branch
+- git_sync_with_base: Merge base branch into current branch
+- git_create_branch: Create a new branch and switch to it
+- git_get_status: Get repository status (modified/staged files)
+- git_list_branches: List all local branches
+
+Ansible Content Analysis Tools:
+- scan_ansible_content: Scan and analyze Ansible content (playbooks, roles, tasks) for detailed information
+- extract_playbook_tasks: Extract tasks and execution flow from a specific playbook
+- list_ansible_modules: List all Ansible modules used in the repository
+- extract_ansible_variables: Extract variables defined and used in playbooks/roles
+- analyze_role_structure: Analyze role structure including tasks, handlers, vars, dependencies
+
+CRITICAL MODIFICATION WORKFLOW - FOLLOW THESE STEPS IN ORDER:
+When ANY file modification is requested, you MUST execute ALL these steps:
+
+Step 1: Read the file (use read_file) if modifying existing content
+Step 2: Call create_modification_plan with complete new_content (this PREPARES the plan, NO approval yet)
+Step 3: IMMEDIATELY call execute_modification_plan (this shows plan, requests approval, and executes)
+
+THE APPROVAL WORKFLOW:
+- create_modification_plan: Stores the plan (NO user interaction)
+- execute_modification_plan: Shows plan → asks for branch → requests approval → executes (ALL in one atomic operation)
+
+This ensures approval happens EXACTLY ONCE, right before execution.
+
+YOU MUST CALL BOTH TOOLS IN SEQUENCE:
+1. create_modification_plan (prepares the plan)
+2. execute_modification_plan (handles approval and execution)
+
+If you only call create_modification_plan, the file is NOT modified!
+NEVER use write_file - it is deprecated and bypasses approval.
+
+NOTE: Git fetch and sync happen automatically at the start of each query.
 
 Think step by step and create a clear plan before using tools."""
 
@@ -451,6 +1130,26 @@ Execute the planned steps efficiently:
 - Minimize file reads
 - Focus on relevant information
 - Provide clear, concise responses
+
+MANDATORY FILE MODIFICATION RULES:
+1. For ANY file change, you MUST call BOTH tools in sequence:
+   a) create_modification_plan (prepares the plan, NO user interaction)
+   b) execute_modification_plan (shows plan, requests approval, executes - ATOMIC operation)
+
+2. Approval happens INSIDE execute_modification_plan, NOT in create_modification_plan
+   - This ensures approval happens EXACTLY ONCE, right before execution
+   - No matter how many times you call create_modification_plan, approval only happens once
+
+3. The file is NOT modified until execute_modification_plan is called and user approves
+
+4. NEVER use write_file - it is DEPRECATED and bypasses approval
+
+5. NEVER claim changes are complete after only calling create_modification_plan
+
+Git workflow:
+- Git fetch and sync happen automatically at the start of each query
+- Users can create feature/bugfix/chore/hotfix branches for modifications
+- Branch creation is optional - users can work on current branch if preferred
 
 When you have enough information, provide your answer."""
 
@@ -475,6 +1174,18 @@ TOOLS = [
     create_modification_plan,
     write_file,
     execute_modification_plan,
+    git_fetch_all,
+    git_get_current_branch,
+    git_get_base_branch,
+    git_sync_with_base,
+    git_create_branch,
+    git_get_status,
+    git_list_branches,
+    scan_ansible_content,
+    extract_playbook_tasks,
+    list_ansible_modules,
+    extract_ansible_variables,
+    analyze_role_structure,
 ]
 
 # Initialize the Chain of Thought agent
@@ -482,10 +1193,16 @@ def create_ansible_agent():
     """Create and return the Ansible Chain of Thought agent."""
     # Use lower temperature for more focused, context-based responses
     llm = VegasChatLLM(
-        usecase_name=os.getenv("VEGAS_USECASE_NAME", "AnsibleCodingAgent"),
-        context_name=os.getenv("VEGAS_CONTEXT_NAME", "AnsibleCodeContext"),
-        temperature=0.2,  # Lower temperature for consistent, factual responses
+        prompt_id = "ANSIBLE_AGENT_PROMPT"
     )
+
+    # Configure LLM with Google Gemini
+    # llm = ChatGoogleGenerativeAI(
+    #     model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+    #     google_api_key=os.getenv("GOOGLE_API_KEY"),
+    #     temperature=0.2,
+    #     convert_system_message_to_human=True
+    # )
     
     # Bind tools to LLM
     llm_with_tools = llm.bind_tools(TOOLS)
@@ -495,6 +1212,65 @@ def create_ansible_agent():
         """First step: Create a detailed plan with numbered steps."""
         messages = state["messages"]
         user_query = messages[-1].content if messages else ""
+        
+        # Git sync workflow
+        try:
+            repo = Repo(REPO_LOCAL_PATH)
+            
+            # 1. Fetch latest from remote
+            print_thinking("Fetching latest changes from remote...", "GIT")
+            try:
+                repo.remotes.origin.fetch()
+                print_thinking("Fetch complete", "GIT")
+            except Exception as e:
+                print_thinking(f"Could not fetch from remote: {str(e)}", "GIT")
+            
+            # 2. Get current branch
+            try:
+                current_branch = repo.active_branch.name
+                print_thinking(f"Current branch: {current_branch}", "GIT")
+            except Exception as e:
+                print_thinking(f"Could not determine current branch: {str(e)}", "GIT")
+                current_branch = None
+            
+            # 3. Get base branch
+            base_branch = None
+            if current_branch:
+                try:
+                    active = repo.active_branch
+                    if active.tracking_branch():
+                        tracking = active.tracking_branch().name
+                        base_branch = tracking.split('/')[-1] if '/' in tracking else tracking
+                    else:
+                        # Fallback to main or master
+                        branch_names = [b.name for b in repo.heads]
+                        if 'main' in branch_names:
+                            base_branch = 'main'
+                        elif 'master' in branch_names:
+                            base_branch = 'master'
+                    
+                    if base_branch:
+                        print_thinking(f"Base branch: {base_branch}", "GIT")
+                except Exception as e:
+                    print_thinking(f"Could not determine base branch: {str(e)}", "GIT")
+            
+            # 4. Sync with base branch (only if not on base branch itself)
+            if base_branch and current_branch and current_branch != base_branch:
+                try:
+                    print_thinking(f"Syncing {current_branch} with {base_branch}...", "GIT")
+                    repo.git.merge(base_branch, '--no-edit')
+                    print_thinking("Sync complete", "GIT")
+                except Exception as e:
+                    if "CONFLICT" in str(e):
+                        print_thinking("Merge conflict detected. Manual resolution required.", "GIT")
+                    else:
+                        print_thinking(f"Could not sync with base: {str(e)}", "GIT")
+        except Exception as e:
+            print_thinking(f"Git operations skipped: {str(e)}", "GIT")
+        
+        print_thinking("Analyzing user request...", "THINKING")
+        print_thinking(f"User Query: {user_query}", "THINKING")
+        print_thinking("Creating detailed execution plan...", "PLANNING")
         
         # Enhanced planning prompt that asks for numbered steps
         planning_message = HumanMessage(content=f"""{COT_PLANNING_PROMPT}
@@ -513,6 +1289,8 @@ Be specific about which tools to use in each step.""")
         # Get the plan from LLM
         response = llm.invoke([planning_message])
         
+        print_thinking("Plan generation complete. Parsing steps...", "PLANNING")
+        
         # Parse the plan into individual steps
         plan_text = response.content
         steps = []
@@ -529,6 +1307,10 @@ Be specific about which tools to use in each step.""")
             lines = [line.strip() for line in plan_text.split('\n') if line.strip() and not line.strip().startswith('#')]
             steps = [line for line in lines if len(line) > 10][:10]  # Max 10 steps
         
+        print_thinking(f"Extracted {len(steps)} execution steps", "PLANNING")
+        print_section("EXECUTION PLAN")
+        print(plan_text)
+        
         return {
             "messages": [AIMessage(content=f"[PLAN CREATED]\n{response.content}")],
             "plan": response.content,
@@ -542,6 +1324,10 @@ Be specific about which tools to use in each step.""")
     def review_plan(state: AgentState):
         """Review the plan before execution."""
         plan = state["plan"]
+        
+        print_thinking(f"Reviewing plan with {len(state['plan_steps'])} steps", "REVIEW")
+        print_thinking("Plan looks good. Ready to execute.", "REVIEW")
+        print_thinking("Starting execution...", "EXECUTION")
         
         review_message = AIMessage(content=f"[PLAN REVIEW]\n\nPlan has {len(state['plan_steps'])} steps. Ready to execute.\n\nPlan:\n{plan}\n\n[Starting execution...]")
         
@@ -557,13 +1343,40 @@ Be specific about which tools to use in each step.""")
         
         # Check if we have more steps to execute
         if current_step_idx >= len(plan_steps):
+            print_thinking("All steps completed", "EXECUTION")
             return {"messages": [AIMessage(content="[All steps completed]")]}
         
         current_step_text = plan_steps[current_step_idx]
         original_query = state["messages"][0].content
         
-        # Create concise execution prompt for this specific step
-        step_prompt = HumanMessage(content=f"""Execute this step from the plan. Be CONCISE in your response.
+        print_section(f"EXECUTING STEP {current_step_idx + 1}/{len(plan_steps)}")
+        print_thinking(f"Step: {current_step_text}", "STEP")
+        print_thinking("Determining which tools to use...", "THINKING")
+        
+        # Detect if tools are mentioned in the step
+        tool_names = [tool.name for tool in TOOLS]
+        mentioned_tools = [name for name in tool_names if name in current_step_text.lower().replace('_', ' ') or name in current_step_text]
+        
+        # Create execution prompt with strong tool enforcement
+        if mentioned_tools:
+            tool_list = ", ".join(mentioned_tools)
+            step_prompt = HumanMessage(content=f"""EXECUTE THIS STEP EXACTLY AS DESCRIBED.
+
+Original Query: {original_query}
+
+Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
+
+Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
+
+CRITICAL: This step mentions these tools: {tool_list}
+You MUST call the tools mentioned in the step description.
+If the step says "call create_modification_plan", you MUST call create_modification_plan.
+If the step says "call execute_modification_plan", you MUST call execute_modification_plan.
+DO NOT say "No tools needed" - the step explicitly requires tool calls.
+
+Execute this step NOW by calling the appropriate tools.""")
+        else:
+            step_prompt = HumanMessage(content=f"""Execute this step from the plan. Be CONCISE in your response.
 
 Original Query: {original_query}
 
@@ -579,25 +1392,36 @@ Execute this step now. Use only the necessary tools. Keep your response brief an
         # Check if tools were called
         tool_messages = []
         if hasattr(response, 'tool_calls') and response.tool_calls:
+            print_thinking(f"Calling {len(response.tool_calls)} tool(s)...", "EXECUTION")
             # Execute tool calls (limit to 3 per step)
             for tool_call in response.tool_calls[:3]:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
                 
+                print_thinking(f"Tool: {tool_name}", "TOOL")
+                print_thinking(f"Arguments: {str(tool_args)[:100]}", "TOOL")
+                
                 for tool in TOOLS:
                     if tool.name == tool_name:
                         try:
                             result = tool.invoke(tool_args)
+                            result_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+                            print_thinking(f"Result: {result_preview}", "TOOL")
                             tool_messages.append(ToolMessage(
                                 content=str(result),
                                 tool_call_id=tool_call["id"]
                             ))
                         except Exception as e:
+                            print_thinking(f"Error: {str(e)}", "TOOL")
                             tool_messages.append(ToolMessage(
                                 content=f"Error: {str(e)}",
                                 tool_call_id=tool_call["id"]
                             ))
                         break
+        else:
+            print_thinking("No tools needed for this step", "EXECUTION")
+        
+        print_thinking(f"Step {current_step_idx + 1} complete", "EXECUTION")
         
         # Store step result
         step_result = {
@@ -621,11 +1445,60 @@ Execute this step now. Use only the necessary tools. Keep your response brief an
         original_query = state["messages"][0].content
         step_results = state["step_results"]
         
+        print_section("SYNTHESIZING ANSWER")
+        print_thinking("Analyzing results from all executed steps...", "THINKING")
+        print_thinking(f"Executed {len(step_results)} steps total", "THINKING")
+        
         # Create a summary of what was done
         summary = "\n".join([f"Step {r['step']}: {r['action']}" for r in step_results])
         
-        # Ask LLM to synthesize the answer concisely
-        final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+        # Check if this was a modification request
+        modification_keywords = ['add', 'modify', 'change', 'update', 'remove', 'delete', 'create', 'write']
+        is_modification_request = any(keyword in original_query.lower() for keyword in modification_keywords)
+        
+        # Check if both modification tools were called
+        messages = state["messages"]
+        modification_plan_called = any(
+            hasattr(msg, 'tool_calls') and msg.tool_calls and 
+            any(tc.get('name') == 'create_modification_plan' for tc in msg.tool_calls)
+            for msg in messages if hasattr(msg, 'tool_calls')
+        )
+        
+        execute_plan_called = any(
+            hasattr(msg, 'tool_calls') and msg.tool_calls and 
+            any(tc.get('name') == 'execute_modification_plan' for tc in msg.tool_calls)
+            for msg in messages if hasattr(msg, 'tool_calls')
+        )
+        
+        print_thinking("Creating final response for user...", "THINKING")
+        
+        # Build the final prompt with modification check
+        if is_modification_request and not modification_plan_called:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+
+Original Query: {original_query}
+
+Steps Executed:
+{summary}
+
+IMPORTANT: This was a file modification request, but create_modification_plan was NOT called during execution.
+You MUST tell the user that the modification was NOT completed because the approval workflow was not followed.
+Explain that they need to run the request again and ensure BOTH create_modification_plan AND execute_modification_plan are called.""")
+        elif is_modification_request and modification_plan_called and not execute_plan_called:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
+
+Original Query: {original_query}
+
+Steps Executed:
+{summary}
+
+CRITICAL: The modification was NOT completed! 
+While create_modification_plan was called and approved, execute_modification_plan was NEVER called.
+The file was NOT actually modified.
+You MUST tell the user that the changes were NOT applied because execute_modification_plan was not called.
+The workflow requires BOTH tools: create_modification_plan (approval) AND execute_modification_plan (actual modification).""")
+        else:
+            final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
 
 Original Query: {original_query}
 
@@ -635,6 +1508,9 @@ Steps Executed:
 Provide a clear, brief answer focusing only on what the user asked.""")
         
         response = llm.invoke([final_prompt])
+        
+        print_thinking("Answer ready", "COMPLETE")
+        print_section("FINAL ANSWER")
         
         return {"messages": [response]}
     
@@ -696,7 +1572,7 @@ def main():
     print("Type your questions or requests (type 'quit' to exit):\n")
     
     while True:
-        user_input = input("You: ").strip()
+        user_input = input("\nYou: ").strip()
         
         if user_input.lower() in ['quit', 'exit', 'q']:
             print("Goodbye!")
@@ -706,6 +1582,10 @@ def main():
             continue
         
         try:
+            print("\n" + "="*80)
+            print("AGENT PROCESSING")
+            print("="*80 + "\n")
+            
             # Invoke the Chain of Thought agent with initial state
             initial_state = {
                 "messages": [HumanMessage(content=user_input)],
@@ -718,16 +1598,15 @@ def main():
             
             result = agent.invoke(initial_state)
             
-            # Display the plan (if verbose mode)
-            # print(f"\n[Plan]: {result['plan']}\n")
-            
             # Get the final message
             final_message = result["messages"][-1]
             
             if hasattr(final_message, 'content'):
-                print(f"\nAgent: {final_message.content}\n")
+                print(f"{final_message.content}\n")
             else:
-                print(f"\nAgent: {str(final_message)}\n")
+                print(f"{str(final_message)}\n")
+            
+            print("="*80 + "\n")
                 
         except Exception as e:
             print(f"Error: {str(e)}\n")

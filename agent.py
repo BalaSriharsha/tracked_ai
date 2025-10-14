@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from pyvegas.langx.llm import VegasChatLLM
-# from langchain_google_genai import ChatGoogleGenerativeAI
+# from pyvegas.langx.llm import VegasChatLLM
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +28,11 @@ REPO_LOCAL_PATH = "./RHEL8-CIS"
 # Global storage for modification plans
 PENDING_MODIFICATION_PLAN = None
 
+# Global thinking state
+# The thinking tag system wraps all intermediate processing and reasoning in <thinking> tags
+# Only the final answer is displayed outside the thinking tags
+_THINKING_ACTIVE = False
+
 # # Clone or update repository
 # def setup_repo():
 #     """Clone or pull the Git repository."""
@@ -40,13 +45,34 @@ PENDING_MODIFICATION_PLAN = None
 #         Repo.clone_from(GIT_REPO_URL, REPO_LOCAL_PATH)
 #     print("Repository ready.")
 
+# Helper functions for thinking tag management
+def start_thinking() -> None:
+    """Open the thinking tag for displaying all intermediate processing."""
+    global _THINKING_ACTIVE
+    if not _THINKING_ACTIVE:
+        print("\n<thinking>", flush=True)
+        _THINKING_ACTIVE = True
+
+def end_thinking() -> None:
+    """Close the thinking tag before displaying final answer."""
+    global _THINKING_ACTIVE
+    if _THINKING_ACTIVE:
+        print("</thinking>\n", flush=True)
+        _THINKING_ACTIVE = False
+
 # Helper functions for displaying agent thinking
 def print_thinking(message: str, prefix="THINKING") -> None:
     """Display agent's thinking process in real-time."""
+    # Ensure we're inside thinking tag
+    if not _THINKING_ACTIVE:
+        start_thinking()
     print(f"[{prefix}] {message}", flush=True)
 
 def print_section(title: str) -> None:
     """Print a section header."""
+    # Ensure we're inside thinking tag
+    if not _THINKING_ACTIVE:
+        start_thinking()
     print(f"\n{'='*80}")
     print(f"{title}")
     print(f"{'='*80}\n", flush=True)
@@ -54,6 +80,9 @@ def print_section(title: str) -> None:
 # Helper functions for interactive modification approval
 def display_modification_plan(plan: dict) -> None:
     """Display modification plan in a formatted, user-friendly way."""
+    # Ensure we're inside thinking tag
+    if not _THINKING_ACTIVE:
+        start_thinking()
     print("\n" + "="*80)
     print("MODIFICATION PLAN")
     print("="*80)
@@ -506,6 +535,86 @@ def analyze_ansible_structure() -> str:
         output.append("")
     
     return "\n".join(output) if any(analysis.values()) else "No Ansible structure detected in the repository."
+
+@tool
+def str_replace_editor(file_path: str, old_str: str, new_str: str) -> str:
+    """String-based search and replace editor. Works like Claude Code's edit tool.
+
+    This tool finds an EXACT string match in a file and replaces it with new content.
+    Use this for all code modifications - it's precise and prevents unwanted changes.
+
+    Workflow:
+    1. First use read_file() to see the exact content
+    2. Copy the EXACT text you want to replace (including whitespace, indentation)
+    3. Provide the new text that should replace it
+    4. Tool will create a modification plan
+    5. Call execute_modification_plan() to apply
+
+    Args:
+        file_path: Path to file relative to repo root
+        old_str: EXACT string to find and replace (must match exactly including whitespace)
+        new_str: New string to replace with
+
+    Returns:
+        Status message about the modification plan
+
+    Example:
+        To add 'FIPS' to a list:
+        old_str = "rhel8cis_allowed_crypto_policies:\n  - 'DEFAULT'\n  - 'FUTURE'"
+        new_str = "rhel8cis_allowed_crypto_policies:\n  - 'DEFAULT'\n  - 'FUTURE'\n  - 'FIPS'"
+
+    Note:
+        - The old_str must appear exactly once in the file (no duplicates)
+        - Preserves all formatting, indentation, and other content
+        - Only modifies the exact string you specify
+    """
+    global PENDING_MODIFICATION_PLAN
+
+    # Read the current file
+    full_path = Path(REPO_LOCAL_PATH) / file_path
+    if not full_path.exists():
+        return f"Error: File {file_path} does not exist."
+
+    try:
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Check if old_str exists in the file
+        if old_str not in content:
+            return f"Error: The specified text was not found in {file_path}. Make sure to copy the EXACT text including whitespace and indentation."
+
+        # Check if old_str appears multiple times
+        count = content.count(old_str)
+        if count > 1:
+            return f"Error: The specified text appears {count} times in {file_path}. The search string must be unique. Make the old_str more specific by including more context."
+
+        # Perform the replacement
+        new_content = content.replace(old_str, new_str)
+
+        # Create modification plan
+        plan = {
+            "modification_description": f"String replacement in {file_path}",
+            "status": "pending_approval",
+            "files_to_modify": [{
+                "file": file_path,
+                "changes": f"Replaced specified text block",
+                "content": new_content
+            }],
+            "new_content": new_content,
+            "target_file": file_path,
+            "instructions": "Call execute_modification_plan to show this plan to the user and request approval."
+        }
+
+        PENDING_MODIFICATION_PLAN = plan
+
+        # Show a preview of what changed
+        old_preview = old_str[:100] + "..." if len(old_str) > 100 else old_str
+        new_preview = new_str[:100] + "..." if len(new_str) > 100 else new_str
+
+        return f"Modification plan created successfully.\nWill replace:\n{old_preview}\n\nWith:\n{new_preview}\n\nCall execute_modification_plan to show full plan and request approval."
+
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 @tool
 def create_modification_plan(description: str, file_path: str = "", changes_summary: str = "", new_content: str = "") -> str:
@@ -1040,12 +1149,18 @@ def analyze_role_structure(role_path: str) -> str:
 # Chain of Thought prompt for planning
 COT_PLANNING_PROMPT = """You are an expert Ansible coding assistant. Before taking any action, think through the problem step by step.
 
+CRITICAL: Do EXACTLY what the user asks for - nothing more, nothing less.
+- If asked to add ONE item to a list, plan to add ONLY that item
+- If asked to modify a specific value, plan to modify ONLY that value
+- Do NOT plan additional changes or improvements beyond what was requested
+
 For the user's query, create a detailed plan following this Chain of Thought approach:
 
 STEP 1 - UNDERSTAND THE QUERY:
-- What is the user asking for?
+- What EXACTLY is the user asking for? (be precise about the scope)
 - What information do I need to answer this?
 - Is this a question, modification request, or analysis task?
+- What is the MINIMUM change needed to satisfy the request?
 
 STEP 2 - PLAN THE APPROACH:
 - Which tools should I use and in what order?
@@ -1077,9 +1192,14 @@ Ansible Tools:
 - search_in_files: Simple text search (returns matching lines only)
 - read_file: Read full file or line range
 
-Modification Tools (ALWAYS use these TWO tools in sequence):
-- create_modification_plan: Prepare modification plan (stores plan, does NOT request approval yet)
-- execute_modification_plan: Show plan to user, request approval, and execute changes (ATOMIC operation)
+Modification Tools:
+- str_replace_editor: PREFERRED tool for making precise edits (like Cursor/Claude Code)
+  * Uses exact string matching and replacement
+  * Workflow: read_file → str_replace_editor(old_str, new_str) → execute_modification_plan
+  * Prevents unwanted changes by only modifying the exact string you specify
+  * Must provide EXACT text with correct whitespace/indentation
+- create_modification_plan: For general modifications (DEPRECATED - prefer str_replace_editor)
+- execute_modification_plan: Show plan to user, request approval, and execute changes
 - write_file: DEPRECATED - Do NOT use this tool
 
 Git Tools:
@@ -1101,21 +1221,25 @@ Ansible Content Analysis Tools:
 CRITICAL MODIFICATION WORKFLOW - FOLLOW THESE STEPS IN ORDER:
 When ANY file modification is requested, you MUST execute ALL these steps:
 
+PREFERRED METHOD (for precision edits):
+Step 1: Use read_file to see the exact file content
+Step 2: Call str_replace_editor with:
+        - old_str: EXACT text from file (copy exactly, including whitespace)
+        - new_str: What it should become (with your changes)
+        This automatically creates the modification plan
+Step 3: Call execute_modification_plan (shows plan, requests approval, executes)
+
+ALTERNATIVE METHOD (for new files or complex rewrites):
 Step 1: Read the file (use read_file) if modifying existing content
-Step 2: Call create_modification_plan with complete new_content (this PREPARES the plan, NO approval yet)
-Step 3: IMMEDIATELY call execute_modification_plan (this shows plan, requests approval, and executes)
+Step 2: Call create_modification_plan with complete new_content
+Step 3: Call execute_modification_plan
 
 THE APPROVAL WORKFLOW:
-- create_modification_plan: Stores the plan (NO user interaction)
-- execute_modification_plan: Shows plan → asks for branch → requests approval → executes (ALL in one atomic operation)
+- str_replace_editor OR create_modification_plan: Stores the plan (NO user interaction)
+- execute_modification_plan: Shows plan → asks for branch → requests approval → executes
 
 This ensures approval happens EXACTLY ONCE, right before execution.
 
-YOU MUST CALL BOTH TOOLS IN SEQUENCE:
-1. create_modification_plan (prepares the plan)
-2. execute_modification_plan (handles approval and execution)
-
-If you only call create_modification_plan, the file is NOT modified!
 NEVER use write_file - it is deprecated and bypasses approval.
 
 NOTE: Git fetch and sync happen automatically at the start of each query.
@@ -1125,11 +1249,19 @@ Think step by step and create a clear plan before using tools."""
 # System prompt for tool execution
 SYSTEM_PROMPT = """You are executing a plan to help with Ansible code.
 
+CRITICAL RULES:
+1. Do EXACTLY what the user asks - nothing more, nothing less
+2. If asked to add one item to a list, add ONLY that item
+3. If asked to modify a specific line, modify ONLY that line
+4. Do NOT make additional improvements or changes beyond what was requested
+5. Do NOT add multiple items when only one was requested
+
 Execute the planned steps efficiently:
 - Use tools as planned
 - Minimize file reads
 - Focus on relevant information
 - Provide clear, concise responses
+- Only do what you are asked to do. Do not do anything else
 
 MANDATORY FILE MODIFICATION RULES:
 1. For ANY file change, you MUST call BOTH tools in sequence:
@@ -1171,8 +1303,8 @@ TOOLS = [
     grep_search,
     search_in_files,
     read_file,
+    str_replace_editor,
     create_modification_plan,
-    write_file,
     execute_modification_plan,
     git_fetch_all,
     git_get_current_branch,
@@ -1192,17 +1324,17 @@ TOOLS = [
 def create_ansible_agent():
     """Create and return the Ansible Chain of Thought agent."""
     # Use lower temperature for more focused, context-based responses
-    llm = VegasChatLLM(
-        prompt_id = "ANSIBLE_AGENT_PROMPT"
-    )
+    # llm = VegasChatLLM(
+    #     prompt_id = "ANSIBLE_AGENT_PROMPT"
+    # )
 
     # Configure LLM with Google Gemini
-    # llm = ChatGoogleGenerativeAI(
-    #     model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-    #     google_api_key=os.getenv("GOOGLE_API_KEY"),
-    #     temperature=0.2,
-    #     convert_system_message_to_human=True
-    # )
+    llm = ChatGoogleGenerativeAI(
+        model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        temperature=0.2,
+        convert_system_message_to_human=True
+    )
     
     # Bind tools to LLM
     llm_with_tools = llm.bind_tools(TOOLS)
@@ -1277,6 +1409,13 @@ def create_ansible_agent():
 
 User Query: {user_query}
 
+IMPORTANT REMINDER:
+- Analyze what the user is asking for PRECISELY
+- If they ask to add 'FIPS' to a list, plan to add ONLY 'FIPS' - do not add other items
+- If they ask to change one value, plan to change ONLY that value
+- Keep all existing content unless explicitly asked to remove or modify it
+- The plan should reflect the MINIMUM change needed to satisfy the user's exact request
+
 Now, create a detailed execution plan. Format your plan as a numbered list of specific steps:
 
 EXECUTION PLAN:
@@ -1284,11 +1423,12 @@ Step 1: [First action to take]
 Step 2: [Second action to take]
 ...
 
-Be specific about which tools to use in each step.""")
+Be specific about which tools to use in each step, and ensure each step aligns with the EXACT user request.""")
         
         # Get the plan from LLM
         response = llm.invoke([planning_message])
         
+        print_thinking("LLM generated execution plan", "MODEL")
         print_thinking("Plan generation complete. Parsing steps...", "PLANNING")
         
         # Parse the plan into individual steps
@@ -1309,7 +1449,11 @@ Be specific about which tools to use in each step.""")
         
         print_thinking(f"Extracted {len(steps)} execution steps", "PLANNING")
         print_section("EXECUTION PLAN")
-        print(plan_text)
+        print_thinking("Plan details:", "PLAN")
+        # Print plan text line by line to keep it in thinking context
+        for line in plan_text.split('\n'):
+            if line.strip():
+                print(line)
         
         return {
             "messages": [AIMessage(content=f"[PLAN CREATED]\n{response.content}")],
@@ -1368,7 +1512,14 @@ Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
 
 Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
 
-CRITICAL: This step mentions these tools: {tool_list}
+CRITICAL RULES FOR FILE MODIFICATIONS:
+1. Read the original query carefully: "{original_query}"
+2. Make ONLY the changes requested - nothing more
+3. If asked to add ONE item, add ONLY that item
+4. Do NOT add additional items or make extra improvements
+5. If modifying a list, keep ALL existing items and add ONLY what was requested
+
+This step mentions these tools: {tool_list}
 You MUST call the tools mentioned in the step description.
 If the step says "call create_modification_plan", you MUST call create_modification_plan.
 If the step says "call execute_modification_plan", you MUST call execute_modification_plan.
@@ -1384,10 +1535,23 @@ Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
 
 Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
 
+CRITICAL: Do EXACTLY what the original query asks for. If adding one item to a list, add ONLY that item.
+Original Query: {original_query}
+
 Execute this step now. Use only the necessary tools. Keep your response brief and focused.""")
         
+        # Add system message to reinforce constraints
+        system_msg = HumanMessage(content=f"""{SYSTEM_PROMPT}
+
+REMINDER: The user's EXACT request is: "{original_query}"
+Make ONLY the changes needed to satisfy this exact request.""")
+
         # Let LLM execute the step with tools
-        response = llm_with_tools.invoke([step_prompt])
+        response = llm_with_tools.invoke([system_msg, step_prompt])
+        
+        # Display LLM reasoning if present
+        if hasattr(response, 'content') and response.content and response.content.strip():
+            print_thinking(f"LLM Reasoning: {response.content[:300]}", "MODEL")
         
         # Check if tools were called
         tool_messages = []
@@ -1445,7 +1609,7 @@ Execute this step now. Use only the necessary tools. Keep your response brief an
         original_query = state["messages"][0].content
         step_results = state["step_results"]
         
-        print_section("SYNTHESIZING ANSWER")
+        print_thinking("Synthesizing final answer...", "SYNTHESIS")
         print_thinking("Analyzing results from all executed steps...", "THINKING")
         print_thinking(f"Executed {len(step_results)} steps total", "THINKING")
         
@@ -1509,8 +1673,12 @@ Provide a clear, brief answer focusing only on what the user asked.""")
         
         response = llm.invoke([final_prompt])
         
+        # Display any intermediate LLM reasoning
+        if hasattr(response, 'content') and response.content:
+            print_thinking("LLM generated response", "MODEL")
+        
         print_thinking("Answer ready", "COMPLETE")
-        print_section("FINAL ANSWER")
+        print_thinking("Preparing final response...", "COMPLETE")
         
         return {"messages": [response]}
     
@@ -1582,6 +1750,9 @@ def main():
             continue
         
         try:
+            # Start thinking tag for all processing
+            start_thinking()
+            
             print("\n" + "="*80)
             print("AGENT PROCESSING")
             print("="*80 + "\n")
@@ -1598,8 +1769,16 @@ def main():
             
             result = agent.invoke(initial_state)
             
+            # End thinking tag before final answer
+            end_thinking()
+            
             # Get the final message
             final_message = result["messages"][-1]
+            
+            # Display final answer outside thinking tag
+            print("\n" + "="*80)
+            print("FINAL ANSWER")
+            print("="*80 + "\n")
             
             if hasattr(final_message, 'content'):
                 print(f"{final_message.content}\n")
@@ -1609,7 +1788,9 @@ def main():
             print("="*80 + "\n")
                 
         except Exception as e:
-            print(f"Error: {str(e)}\n")
+            # Make sure to close thinking tag on error
+            end_thinking()
+            print(f"\nError: {str(e)}\n")
             import traceback
             traceback.print_exc()
 
