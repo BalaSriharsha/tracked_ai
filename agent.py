@@ -881,7 +881,7 @@ REQUIRED ACTION:
 3. Call apply_file_edit again with the ABSOLUTE path
 
 Example of correct absolute path:
-  /Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml
+  /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml
 """
     
     # Check if file exists
@@ -1027,7 +1027,7 @@ REQUIRED ACTION:
 4. Call create_modification_plan again with the ABSOLUTE path
 
 Example of correct absolute path:
-  /Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml
+  /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml
 
 NEVER use paths like:
   - roles/something/vars/main.yml
@@ -1773,8 +1773,8 @@ Rule 1: ALWAYS USE ABSOLUTE PATHS FROM SEARCH TOOLS
 Rule 2: EXTRACT ABSOLUTE PATHS FROM SEARCH RESULTS
   - Search results format: '/absolute/path/to/file.yml:LINE_NUMBER: content'
   - The file path is EVERYTHING before the FIRST colon
-  - Example: '/Users/user/RHEL8-CIS/vars/main.yml:4: content' 
-    → file path is '/Users/user/RHEL8-CIS/vars/main.yml'
+  - Example: '/Users/user/repo_name/vars/main.yml:4: content' 
+    → file path is '/Users/user/repo_name/vars/main.yml'
   - NEVER truncate or modify the path
 
 Rule 3: USE ABSOLUTE PATHS EXACTLY AS SHOWN
@@ -1826,9 +1826,9 @@ CRITICAL: Before calling read_file, you MUST:
 
 EXAMPLE (FOLLOW THIS PATTERN):
 If intelligent_search shows:
-  >>> /Users/user/github_agent/RHEL8-CIS/vars/main.yml <<<
+  >>> /Users/user/folder_name/repo_name/vars/main.yml <<<
 Then you MUST call:
-  read_file('/Users/user/github_agent/RHEL8-CIS/vars/main.yml')
+  read_file('/Users/user/folder_name/repo_name/vars/main.yml')
 NOT:
   read_file('vars/main.yml')  [WRONG - truncated absolute path]
   read_file('roles/rhel8-cis/vars/main.yml')  [WRONG - hallucinated path]
@@ -1839,10 +1839,10 @@ STOP! READ THIS BEFORE EVERY read_file() CALL:
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 When you see intelligent_search results showing:
-  >>> /Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml <<<
+  >>> /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml <<<
 
 You MUST use that EXACT path:
-  ✓ CORRECT: read_file('/Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml')
+  ✓ CORRECT: read_file('/Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml')
   ✗ WRONG:   read_file('roles/rhel8-cis/vars/main.yml')
   ✗ WRONG:   read_file('vars/main.yml')
 
@@ -1954,8 +1954,8 @@ THE APPROVAL WORKFLOW:
 - execute_modification_plan: Shows diff → asks for branch → requests approval → executes
 
 CRITICAL: When creating modification plan, use ABSOLUTE path from search results!
-Example: file_path='/Users/user/github_agent/RHEL8-CIS/vars/main.yml'
-NOT: file_path='roles/rhel8-cis/vars/main.yml' [WRONG]
+Example: file_path='/Users/user/folder_name/repo_name/vars/main.yml'
+NOT: file_path='roles/repo_name/vars/main.yml' [WRONG]
 NOT: file_path='vars/main.yml' [WRONG]
 
 YOU MUST CALL BOTH TOOLS IN SEQUENCE:
@@ -1981,8 +1981,8 @@ CRITICAL WORKFLOW AFTER intelligent_search (MANDATORY):
 
 Step 1: intelligent_search finds files and shows:
 ```
->>> /Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml <<<
->>> /Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/tasks/main.yml <<<
+>>> /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml <<<
+>>> /Users/user/folder_name_1/folder_name_2/repo_name/tasks/main.yml <<<
 ```
 
 Step 2: IMMEDIATELY call read_all_found_files()
@@ -1992,8 +1992,8 @@ Step 2: IMMEDIATELY call read_all_found_files()
 - Decide which file to modify based on actual content
 
 Step 3: Create modification plan with ABSOLUTE path from file listing
-✓ CORRECT: create_modification_plan(file_path='/Users/balasriharshach/BalaSriharsha/github_agent/RHEL8-CIS/vars/main.yml', ...)
-✗ WRONG:   create_modification_plan(file_path='roles/rhel8-cis/vars/main.yml', ...)
+✓ CORRECT: create_modification_plan(file_path='/Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml', ...)
+✗ WRONG:   create_modification_plan(file_path='roles/repo_name/vars/main.yml', ...)
 ✗ WRONG:   create_modification_plan(file_path='vars/main.yml', ...)
 
 The path starts with / and contains the full directory structure. Use it EXACTLY as shown.
