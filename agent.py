@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-# from pyvegas.langx.llm import VegasChatLLM
-from langchain_google_genai import ChatGoogleGenerativeAI
+from pyvegas.langx.llm import VegasChatLLM
+# from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +30,9 @@ PENDING_MODIFICATION_PLAN = None
 
 # Global storage for last search results (file paths)
 _LAST_SEARCH_PATHS = []
+
+# Global storage for discovered role paths
+_DISCOVERED_ROLE_PATHS = []
 
 # Global thinking state
 # The thinking tag system wraps all intermediate processing and reasoning in <thinking> tags
@@ -773,11 +776,18 @@ def analyze_ansible_structure() -> str:
                     pass
     
     # Find roles
+    global _DISCOVERED_ROLE_PATHS
+    discovered_roles = []
+    
     roles_path = base_path / "roles"
     if roles_path.exists():
         for role_dir in roles_path.iterdir():
             if role_dir.is_dir() and not role_dir.name.startswith('.'):
                 role_info = {"name": role_dir.name, "components": []}
+                
+                # Store the role path for validation
+                role_rel_path = str(role_dir.relative_to(REPO_LOCAL_PATH))
+                discovered_roles.append(role_rel_path)
                 
                 # Check for standard role structure
                 for component in ["tasks", "handlers", "templates", "files", "vars", "defaults", "meta"]:
@@ -786,6 +796,16 @@ def analyze_ansible_structure() -> str:
                         role_info["components"].append(component)
                 
                 analysis["roles"].append(role_info)
+    
+    # Also check for roles in current directory (like RHEL8-CIS which is a role itself)
+    # Check if current directory has role structure
+    role_components = ["tasks", "handlers", "defaults", "vars", "meta", "templates", "files"]
+    if any((base_path / comp).exists() for comp in role_components):
+        # This is a role directory
+        discovered_roles.append(".")
+    
+    # Store discovered role paths globally
+    _DISCOVERED_ROLE_PATHS = discovered_roles
     
     # Find inventory files
     for pattern in ["inventory/*", "hosts", "inventory.ini", "inventory.yml"]:
@@ -1696,19 +1716,70 @@ def extract_ansible_variables(content_path: str) -> str:
 def analyze_role_structure(role_path: str) -> str:
     """Analyze the structure of an Ansible role including tasks, handlers, vars, and dependencies.
     
+    CRITICAL: role_path must be from discovered roles - do NOT hallucinate!
+    Call analyze_ansible_structure first to discover available roles.
+    
     Args:
-        role_path: Path to the role directory relative to repo root
+        role_path: Path to the role directory relative to repo root (use discovered paths only)
     
     Returns:
         JSON with role structure, components, and dependencies
     """
+    global _DISCOVERED_ROLE_PATHS
+    
+    # CRITICAL VALIDATION - Prevents role_path hallucination
+    
+    # Check 1: If we have discovered role paths, validate against them
+    if _DISCOVERED_ROLE_PATHS and role_path not in _DISCOVERED_ROLE_PATHS:
+        available_roles = "\n".join(f"  - {r}" for r in _DISCOVERED_ROLE_PATHS)
+        return f"""
+ERROR: ROLE PATH HALLUCINATION DETECTED!
+
+The role_path you provided was NOT discovered by analyze_ansible_structure!
+
+You provided: {role_path}
+
+Available discovered role paths:
+{available_roles}
+
+IMMEDIATE RETRY REQUIRED:
+You MUST retry analyze_role_structure NOW in THIS SAME STEP with a correct role path!
+
+1. Look at the available role paths listed above
+2. Select the correct role path from the list
+3. Call analyze_role_structure AGAIN with one of the paths above
+
+DO NOT move to the next step!
+DO NOT guess or generate role paths!
+ONLY use role paths from the discovered list above!
+
+If you need to discover roles first, call analyze_ansible_structure() to populate the list.
+"""
+    
     try:
         from ansible_content_capture.scanner import AnsibleScanner
         
         full_path = os.path.join(REPO_LOCAL_PATH, role_path)
         
+        # Check 2: Path must actually exist
         if not os.path.exists(full_path):
-            return f"Error: Role directory not found: {role_path}"
+            available_roles = "\n".join(f"  - {r}" for r in _DISCOVERED_ROLE_PATHS) if _DISCOVERED_ROLE_PATHS else "  (No roles discovered - run analyze_ansible_structure first)"
+            return f"""
+ERROR: ROLE DIRECTORY DOES NOT EXIST!
+
+The role_path you provided does not exist on the filesystem!
+
+You provided: {role_path}
+Full path: {full_path}
+
+Available discovered role paths:
+{available_roles}
+
+REQUIRED ACTION:
+1. Use one of the discovered role paths listed above
+2. If the list is empty, call analyze_ansible_structure() first to discover roles
+3. Then call analyze_role_structure with a valid role path from the discovered list
+"""
         
         # Check if it's a valid role directory
         role_components = ["tasks", "handlers", "defaults", "vars", "meta", "templates", "files"]
@@ -1808,6 +1879,16 @@ Rule 7: DISCOVERED PATHS ARE PROVIDED IN EXECUTION CONTEXT
   - If you need a file path for a tool argument, copy it EXACTLY from this list
   - Do NOT generate, construct, or modify paths - ONLY use discovered paths
 
+Rule 8: DISCOVERED ROLE PATHS - NEVER HALLUCINATE ROLE PATHS
+  - Role paths are discovered by analyze_ansible_structure() tool
+  - When executing steps, discovered role paths are shown in the prompt
+  - Look for "DISCOVERED ROLE PATHS" section in the execution context
+  - For analyze_role_structure(role_path), ONLY use role paths from discovered list
+  - Do NOT generate role paths like "roles/my-role" - ONLY use discovered paths
+  - If role paths list is empty, you MUST call analyze_ansible_structure() first
+  - Examples of valid discovered role paths: ".", "roles/common", "roles/webserver"
+  - The system validates role_path against discovered roles - hallucinations will be REJECTED
+
 MANDATORY WORKFLOW WHEN USING intelligent_search:
 Step 1: Call intelligent_search and receive results
 Step 2: Look for the section with "!!!!..." and ">>> path <<<"
@@ -1855,7 +1936,7 @@ ALWAYS use the COMPLETE absolute path from >>> <<< markers
 Available Tools:
 
 Ansible Tools:
-- analyze_ansible_structure: Repository overview
+- analyze_ansible_structure: Repository overview (discovers roles and populates discovered role paths list)
 - find_relevant_files: Find relevant files by keywords
 - get_file_summary: Preview file without full read
 - list_files: List directory contents
@@ -1865,6 +1946,7 @@ Ansible Tools:
 - search_in_files: Simple text search (returns matching lines only)
 - read_file: Read file using ABSOLUTE path from search results (paths start with /)
 - verify_modification: MANDATORY tool to verify changes after execution (enables retry loop)
+- analyze_role_structure: Analyze role (CRITICAL: MUST call analyze_ansible_structure first to discover role paths)
 
 CRITICAL SEARCH STRATEGY (MANDATORY):
 When searching for variables/config names, follow this EXACT sequence:
@@ -1919,7 +2001,7 @@ Ansible Content Analysis Tools:
 - extract_playbook_tasks: Extract tasks and execution flow from a specific playbook
 - list_ansible_modules: List all Ansible modules used in the repository
 - extract_ansible_variables: Extract variables defined and used in playbooks/roles
-- analyze_role_structure: Analyze role structure including tasks, handlers, vars, dependencies
+- analyze_role_structure: Analyze role structure (CRITICAL: use ONLY discovered role paths from analyze_ansible_structure)
 
 CRITICAL MODIFICATION WORKFLOW - SURGICAL EDITS ONLY!
 
@@ -2079,17 +2161,17 @@ TOOLS = [
 def create_ansible_agent():
     """Create and return the Ansible Chain of Thought agent."""
     # Use lower temperature for more focused, context-based responses
-    # llm = VegasChatLLM(
-    #     prompt_id = "ANSIBLE_AGENT_PROMPT"
-    # )
+    llm = VegasChatLLM(
+        prompt_id = "ANSIBLE_AGENT_PROMPT"
+    )
 
     # Configure LLM with Google Gemini
-    llm = ChatGoogleGenerativeAI(
-        model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.2,
-        convert_system_message_to_human=True
-    )
+    # llm = ChatGoogleGenerativeAI(
+    #     model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+    #     google_api_key=os.getenv("GOOGLE_API_KEY"),
+    #     temperature=0.2,
+    #     convert_system_message_to_human=True
+    # )
     
     # Bind tools to LLM
     llm_with_tools = llm.bind_tools(TOOLS)
@@ -2250,7 +2332,7 @@ Be specific about which tools to use in each step.""")
         mentioned_tools = [name for name in tool_names if name in current_step_text.lower().replace('_', ' ') or name in current_step_text]
         
         # Get discovered file paths from global state
-        global _LAST_SEARCH_PATHS
+        global _LAST_SEARCH_PATHS, _DISCOVERED_ROLE_PATHS
         discovered_paths_context = ""
         if _LAST_SEARCH_PATHS:
             paths_list = "\n".join(f"  - {p}" for p in _LAST_SEARCH_PATHS)
@@ -2261,6 +2343,19 @@ DISCOVERED FILE PATHS (use ONLY these paths - DO NOT generate new paths):
 
 CRITICAL: If you need to use a file path in tool arguments, you MUST copy one of the paths listed above EXACTLY.
 DO NOT construct, generate, or guess file paths. ONLY use paths from the list above.
+"""
+        
+        # Get discovered role paths from global state
+        discovered_roles_context = ""
+        if _DISCOVERED_ROLE_PATHS:
+            roles_list = "\n".join(f"  - {r}" for r in _DISCOVERED_ROLE_PATHS)
+            discovered_roles_context = f"""
+
+DISCOVERED ROLE PATHS (use ONLY these paths - DO NOT generate new role paths):
+{roles_list}
+
+CRITICAL: If you need to use a role_path in tool arguments (e.g., analyze_role_structure), you MUST copy one of the paths listed above EXACTLY.
+DO NOT construct, generate, or guess role paths. ONLY use role paths from the list above.
 """
         
         # Get file content from previous steps if read_all_found_files was called
@@ -2289,6 +2384,7 @@ Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
 
 Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
 {discovered_paths_context}
+{discovered_roles_context}
 {file_content_context}
 
 CRITICAL: This step mentions these tools: {tool_list}
@@ -2315,6 +2411,7 @@ Current Step ({current_step_idx + 1}/{len(plan_steps)}): {current_step_text}
 
 Previous Results: {state['step_results'][-3:] if state['step_results'] else 'None'}
 {discovered_paths_context}
+{discovered_roles_context}
 {file_content_context}
 
 IMPORTANT: If creating a modification, use the EXACT content from the file output above.
@@ -2434,7 +2531,7 @@ Execute this step now. Use only the necessary tools. Keep your response brief an
         print_thinking("Creating final response for user...", "THINKING")
         
         # Get discovered file paths for context
-        global _LAST_SEARCH_PATHS
+        global _LAST_SEARCH_PATHS, _DISCOVERED_ROLE_PATHS
         discovered_paths_info = ""
         if _LAST_SEARCH_PATHS:
             paths_list = "\n".join(f"  - {p}" for p in _LAST_SEARCH_PATHS)
@@ -2447,6 +2544,19 @@ CRITICAL: If you mention file paths in your answer, ONLY use the exact paths lis
 DO NOT construct, generate, or guess file paths like 'roles/something/file.yml'.
 """
         
+        # Get discovered role paths for context
+        discovered_roles_info = ""
+        if _DISCOVERED_ROLE_PATHS:
+            roles_list = "\n".join(f"  - {r}" for r in _DISCOVERED_ROLE_PATHS)
+            discovered_roles_info = f"""
+
+DISCOVERED ROLE PATHS (DO NOT hallucinate role paths - ONLY use these):
+{roles_list}
+
+CRITICAL: If you mention role paths in your answer, ONLY use the exact role paths listed above.
+DO NOT construct, generate, or guess role paths.
+"""
+        
         # Build the final prompt with modification check
         if is_modification_request and not modification_plan_called:
             final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
@@ -2456,12 +2566,13 @@ Original Query: {original_query}
 Steps Executed:
 {summary}
 {discovered_paths_info}
+{discovered_roles_info}
 
 IMPORTANT: This was a file modification request, but create_modification_plan was NOT called during execution.
 You MUST tell the user that the modification was NOT completed because the approval workflow was not followed.
 Explain that they need to run the request again and ensure BOTH create_modification_plan AND execute_modification_plan are called.
 
-If mentioning file paths, use ONLY the discovered paths listed above.""")
+If mentioning file paths or role paths, use ONLY the discovered paths/roles listed above.""")
         elif is_modification_request and modification_plan_called and not execute_plan_called:
             final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
 
@@ -2470,6 +2581,7 @@ Original Query: {original_query}
 Steps Executed:
 {summary}
 {discovered_paths_info}
+{discovered_roles_info}
 
 CRITICAL: The modification was NOT completed! 
 While create_modification_plan was called and approved, execute_modification_plan was NEVER called.
@@ -2477,7 +2589,7 @@ The file was NOT actually modified.
 You MUST tell the user that the changes were NOT applied because execute_modification_plan was not called.
 The workflow requires BOTH tools: create_modification_plan (approval) AND execute_modification_plan (actual modification).
 
-If mentioning file paths, use ONLY the discovered paths listed above.""")
+If mentioning file paths or role paths, use ONLY the discovered paths/roles listed above.""")
         else:
             final_prompt = HumanMessage(content=f"""Based on the plan execution, provide a CONCISE answer to the user's query.
 
@@ -2486,10 +2598,11 @@ Original Query: {original_query}
 Steps Executed:
 {summary}
 {discovered_paths_info}
+{discovered_roles_info}
 
 Provide a clear, brief answer focusing only on what the user asked.
 
-If mentioning file paths, use ONLY the discovered paths listed above - DO NOT hallucinate paths.""")
+If mentioning file paths or role paths, use ONLY the discovered paths/roles listed above - DO NOT hallucinate paths.""")
         
         response = llm.invoke([final_prompt])
         
