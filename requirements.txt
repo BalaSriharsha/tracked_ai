@@ -2,3 +2,7 @@
 gitpython
 python-dotenv
 langchain-google-genai
+sentence-transformers
+faiss-cpu
+pyyaml
+langchain-community
