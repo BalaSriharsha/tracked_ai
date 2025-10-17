@@ -46,6 +46,7 @@ class RAGAgent:
         self.embedder = None
         self.index_builder = None
         self.query_engine = None
+        self.use_pyvegas = bool(self.config.get('use_pyvegas', False))
     
     def build_index(self, force_rebuild: bool = False):
         """
@@ -92,7 +93,7 @@ class RAGAgent:
         print("\n" + "="*80)
         print("STEP 2: GENERATING EMBEDDINGS")
         print("="*80)
-        self.embedder = Embedder(model_name=self.embedding_model)
+        self.embedder = Embedder(model_name=self.embedding_model, use_pyvegas=self.use_pyvegas)
         embeddings, metadata = self.embedder.embed_chunks(chunks_dict)
         
         # Step 3: Build FAISS index
@@ -121,7 +122,7 @@ class RAGAgent:
         print(f"Loading index from {self.index_path}...")
         
         # Load embedder
-        self.embedder = Embedder(model_name=self.embedding_model)
+        self.embedder = Embedder(model_name=self.embedding_model, use_pyvegas=self.use_pyvegas)
         
         # Load index
         self.index_builder = IndexBuilder()
@@ -163,7 +164,7 @@ class RAGAgent:
         print(f"Top-K Results: {self.top_k}")
         print("="*80)
         print("\nType your questions about the Ansible repository")
-        print("Commands: 'quit' or 'exit' to quit, 'stats' for index statistics\n")
+        print("Commands: 'quit' or 'exit' to quit, 'stats' for index statistics, 'modify' to change code, 'update' to update index, 'help' for help\n")
         
         while True:
             try:
@@ -173,8 +174,62 @@ class RAGAgent:
                     print("Goodbye!")
                     break
                 
+                if question.lower() in ['help', 'h', '?']:
+                    print("\nAvailable commands:")
+                    print("  - Ask any question to query the index")
+                    print("  - stats           Show index statistics")
+                    print("  - modify          Start interactive code modification with approvals")
+                    print("  - update          Incrementally update the index")
+                    print("  - quit/exit/q     Exit")
+                    continue
+                
                 if question.lower() == 'stats':
                     self.print_stats()
+                    continue
+                
+                if question.lower().startswith('update'):
+                    self.update_index()
+                    continue
+                
+                # Interactive modify flow
+                if question.lower().startswith('modify'):
+                    # Parse inline instruction if provided: e.g. "modify Update SSH settings"
+                    parts = question.split(' ', 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        instruction = parts[1].strip()
+                    else:
+                        instruction = input("Instruction: ").strip()
+                        if not instruction:
+                            print("No instruction provided. Cancelling.")
+                            continue
+                    
+                    files_input = input("Target files (comma-separated, blank to auto-discover): ").strip()
+                    target_files = None
+                    if files_input:
+                        target_files = [f.strip() for f in files_input.split(',') if f.strip()]
+                        if not target_files:
+                            target_files = None
+                    
+                    dry_resp = input("Dry run? (y/N): ").strip().lower()
+                    dry_run = dry_resp in ['y', 'yes']
+                    
+                    mode_resp = input("Approval mode [i]nteractive/[a]uto (default i): ").strip().lower()
+                    auto_approve = mode_resp in ['a', 'auto']
+                    
+                    stats = self.modify_code(
+                        instruction=instruction,
+                        target_files=target_files,
+                        auto_approve=auto_approve,
+                        dry_run=dry_run,
+                        require_final_confirm=True
+                    )
+                    
+                    # Offer to update index if changes applied and not a dry run
+                    if isinstance(stats, dict) and stats.get('applied', 0) > 0 and not dry_run:
+                        upd = input("Update index now to reflect changes? (y/N): ").strip().lower()
+                        if upd in ['y', 'yes']:
+                            self.update_index()
+                    
                     continue
                 
                 if not question:
@@ -272,7 +327,7 @@ class RAGAgent:
         print("\n✅ Incremental update complete!")
     
     def modify_code(self, instruction: str, target_files: Optional[List[str]] = None,
-                   auto_approve: bool = False, dry_run: bool = False):
+                   auto_approve: bool = False, dry_run: bool = False, require_final_confirm: bool = False):
         """
         Modify code with approval workflow
         
@@ -281,6 +336,7 @@ class RAGAgent:
             target_files: Specific files to modify
             auto_approve: Auto-approve all changes
             dry_run: Show changes without applying
+            require_final_confirm: Ask for final confirmation before applying (used in interactive mode)
         """
         from code_modifier import CodeModifierAgent
         
@@ -290,7 +346,7 @@ class RAGAgent:
                 self.load_index()
             except:
                 print("⚠️  Could not load index. Specify --files explicitly.")
-                return
+                return {'applied': 0, 'errors': 0}
         
         # Create code modifier
         modifier = CodeModifierAgent(
@@ -303,7 +359,7 @@ class RAGAgent:
         
         if not modifications:
             print("\n❌ No modifications planned")
-            return
+            return {'applied': 0, 'errors': 0}
         
         # Review
         modifier.review_modifications()
@@ -313,6 +369,26 @@ class RAGAgent:
             modifier.approve_all()
         else:
             modifier.interactive_approval()
+            
+        # Final confirmation before apply (only when not auto-approving)
+        if require_final_confirm and not auto_approve:
+            approved_paths = [m.file_path for m in modifier.modifications if m.approved]
+            approved_count = len(approved_paths)
+            if approved_count == 0:
+                print("\nNo approved modifications to apply")
+                return {'applied': 0, 'errors': 0}
+            print("\n" + "="*80)
+            print("FINAL APPROVAL")
+            print("="*80)
+            print(f"About to apply {approved_count} approved modification(s):")
+            for p in approved_paths[:10]:
+                print(f"  - {p}")
+            if approved_count > 10:
+                print(f"  ... and {approved_count - 10} more")
+            resp = input("Proceed to apply changes? (y/N): ").strip().lower()
+            if resp not in ['y', 'yes']:
+                print("\n❌ Application cancelled")
+                return {'applied': 0, 'errors': 0}
         
         # Apply
         stats = modifier.apply_modifications(dry_run=dry_run)
@@ -324,6 +400,8 @@ class RAGAgent:
             print("Modified files detected. Consider updating the index:")
             print(f"  python3 rag_agent.py --update")
             print("="*80 + "\n")
+        
+        return stats
 
 
 def main():
@@ -377,6 +455,7 @@ Note: Use 'python3' instead of 'python' (Python 3.8+ required)
     parser.add_argument('--chunk-overlap', type=int, default=None, help='Chunk overlap')
     parser.add_argument('--top-k', type=int, default=None, help='Number of results to retrieve')
     parser.add_argument('--force', action='store_true', help='Force rebuild index')
+    parser.add_argument('--pyvegas', action='store_true', help='Use PyVegas VegasEmbeddingService for embeddings')
     
     # Code modification options
     parser.add_argument('--files', nargs='+', help='Specific files to modify (for --modify mode)')
@@ -399,6 +478,8 @@ Note: Use 'python3' instead of 'python' (Python 3.8+ required)
         config['chunk_overlap'] = args.chunk_overlap
     if args.top_k:
         config['top_k'] = args.top_k
+    if args.pyvegas:
+        config['use_pyvegas'] = True
     
     # Create agent
     agent = RAGAgent(config=config)

@@ -14,19 +14,36 @@ from sentence_transformers import SentenceTransformer
 class Embedder:
     """Generate embeddings for text chunks"""
     
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', device: Optional[str] = None):
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', device: Optional[str] = None, use_pyvegas: bool = False):
         """
         Initialize the embedder
         
         Args:
             model_name: Name of the sentence-transformers model
             device: Device to use ('cuda', 'cpu', or None for auto)
+            use_pyvegas: If True, use PyVegas VegasEmbeddingService for embeddings
         """
-        print(f"Loading embedding model: {model_name}...")
-        self.model = SentenceTransformer(model_name, device=device)
+        self.backend = 'pyvegas' if use_pyvegas else 'sentence-transformers'
         self.model_name = model_name
-        self.embedding_dim = self.model.get_sentence_embedding_dimension()
-        print(f"Model loaded. Embedding dimension: {self.embedding_dim}")
+        self.embedding_dim: Optional[int] = None
+        self.model = None
+        self.vegas = None
+        
+        if self.backend == 'pyvegas':
+            try:
+                # Lazy import to avoid hard dependency unless flag is used
+                from pyvegas.langx import VegasEmbeddingService  # type: ignore
+            except Exception as e:
+                raise ImportError("PyVegas not installed. Please install 'pyvegas' to use --pyvegas mode.") from e
+            print("Initializing PyVegas VegasEmbeddingService for embeddings...")
+            self.vegas = VegasEmbeddingService()
+            # Dimension will be inferred on first encode
+            print("PyVegas embedding service initialized.")
+        else:
+            print(f"Loading embedding model: {model_name}...")
+            self.model = SentenceTransformer(model_name, device=device)
+            self.embedding_dim = self.model.get_sentence_embedding_dimension()
+            print(f"Model loaded. Embedding dimension: {self.embedding_dim}")
     
     def embed_chunks(self, chunks: List[Dict[str, Any]], batch_size: int = 32, 
                     show_progress: bool = True) -> Tuple[np.ndarray, List[Dict]]:
@@ -50,13 +67,25 @@ class Embedder:
         texts = [chunk['content'] for chunk in chunks]
         
         # Generate embeddings
-        embeddings = self.model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=show_progress,
-            convert_to_numpy=True,
-            normalize_embeddings=True  # Normalize for better similarity search
-        )
+        if self.backend == 'pyvegas':
+            # VegasEmbeddingService exposes LangChain-compatible API
+            vectors = self.vegas.embed_documents(texts)
+            import numpy as np  # local import safe here
+            embeddings = np.asarray(vectors, dtype=np.float32)
+            # Normalize embeddings as done for sentence-transformers
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            embeddings = embeddings / norms
+            if self.embedding_dim is None and embeddings.size:
+                self.embedding_dim = embeddings.shape[1]
+        else:
+            embeddings = self.model.encode(
+                texts,
+                batch_size=batch_size,
+                show_progress_bar=show_progress,
+                convert_to_numpy=True,
+                normalize_embeddings=True  # Normalize for better similarity search
+            )
         
         # Prepare metadata (include chunk info)
         metadata_list = []
@@ -83,12 +112,23 @@ class Embedder:
         Returns:
             Query embedding as numpy array
         """
-        embedding = self.model.encode(
-            [query],
-            convert_to_numpy=True,
-            normalize_embeddings=True
-        )
-        return embedding[0]
+        if self.backend == 'pyvegas':
+            vector = self.vegas.embed_query(query)
+            import numpy as np
+            arr = np.asarray(vector, dtype=np.float32)
+            # Normalize
+            norm = np.linalg.norm(arr) or 1.0
+            arr = arr / norm
+            if self.embedding_dim is None and arr.size:
+                self.embedding_dim = arr.shape[0]
+            return arr
+        else:
+            embedding = self.model.encode(
+                [query],
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+            return embedding[0]
     
     def save_embeddings(self, embeddings: np.ndarray, metadata: List[Dict], 
                        output_dir: str, filename_prefix: str = 'embeddings'):

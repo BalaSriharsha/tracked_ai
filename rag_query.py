@@ -10,6 +10,7 @@ import numpy as np
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
+# from pyvegas.langx.llm import VegasChatLLM
 
 @dataclass
 class QueryResult:
@@ -50,6 +51,10 @@ class RAGQueryEngine:
             google_api_key=api_key,
             temperature=temperature
         )
+
+        # self.llm = VegasChatLLM(
+        #     prompt_id = "ANSIBLE_AGENT_PROMPT"
+        # )
     
     def query(self, question: str, top_k: int = 5, min_similarity_threshold: float = 0.0) -> QueryResult:
         """

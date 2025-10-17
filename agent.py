@@ -21,18 +21,16 @@ ansible_capture_path = os.path.join(os.path.dirname(__file__), "ansible-content-
 if os.path.exists(ansible_capture_path) and ansible_capture_path not in sys.path:
     sys.path.insert(0, ansible_capture_path)
 
-# Configuration - Use environment variables or command-line arguments
-REPO_LOCAL_PATH = os.getenv("REPO_LOCAL_PATH", ".")
-GIT_REPO_URL = os.getenv("GIT_REPO_URL", "")
+# Configuration - Use environment variables with defaults
+REPO_LOCAL_PATH = os.getenv("REPO_LOCAL_PATH", "./RHEL8-CIS")
+MAX_FILES_IN_INVENTORIES = int(os.getenv("MAX_FILES_IN_INVENTORIES", "15"))
+MAX_FILES_IN_HOST_VARS = int(os.getenv("MAX_FILES_IN_HOST_VARS", "15"))
 
 # Global storage for modification plans
 PENDING_MODIFICATION_PLAN = None
 
 # Global storage for last search results (file paths)
 _LAST_SEARCH_PATHS = []
-
-# Global storage for last search term (for context extraction)
-_LAST_SEARCH_TERM = None
 
 # Global storage for discovered role paths
 _DISCOVERED_ROLE_PATHS = []
@@ -45,43 +43,37 @@ _THINKING_ACTIVE = False
 # Configuration constants for display and preview limits
 class Config:
     # Diff preview limits
-    DIFF_PREVIEW_LINES = 10
-    CONTENT_PREVIEW_CHARS = 500
+    DIFF_PREVIEW_LINES = int(os.getenv("DIFF_PREVIEW_LINES", "10"))
+    CONTENT_PREVIEW_CHARS = int(os.getenv("CONTENT_PREVIEW_CHARS", "500"))
     
     # Branch name limits
-    BRANCH_NAME_MAX_LENGTH = 40
+    BRANCH_NAME_MAX_LENGTH = int(os.getenv("BRANCH_NAME_MAX_LENGTH", "40"))
     
     # File reading limits
-    LARGE_FILE_LINE_THRESHOLD = 500
-    LARGE_FILE_PREVIEW_LINES = 100
+    LARGE_FILE_LINE_THRESHOLD = int(os.getenv("LARGE_FILE_LINE_THRESHOLD", "500"))
+    LARGE_FILE_PREVIEW_LINES = int(os.getenv("LARGE_FILE_PREVIEW_LINES", "100"))
     
     # File summary limits
-    SUMMARY_PREVIEW_START_LINES = 10
-    SUMMARY_PREVIEW_END_LINES = 5
-    SUMMARY_TOTAL_LINES_THRESHOLD = 15
+    SUMMARY_PREVIEW_START_LINES = int(os.getenv("SUMMARY_PREVIEW_START_LINES", "10"))
+    SUMMARY_PREVIEW_END_LINES = int(os.getenv("SUMMARY_PREVIEW_END_LINES", "5"))
+    SUMMARY_TOTAL_LINES_THRESHOLD = int(os.getenv("SUMMARY_TOTAL_LINES_THRESHOLD", "15"))
     
     # Search and analysis limits
-    QUICK_SCAN_LINES = 200
-    MAX_RELEVANT_FILES_DISPLAY = 15
-    MAX_ITEMS_DISPLAY = 10
-    MAX_GROUP_VARS_DISPLAY = 5
+    QUICK_SCAN_LINES = int(os.getenv("QUICK_SCAN_LINES", "200"))
+    MAX_RELEVANT_FILES_DISPLAY = int(os.getenv("MAX_RELEVANT_FILES_DISPLAY", "15"))
+    MAX_ITEMS_DISPLAY = int(os.getenv("MAX_ITEMS_DISPLAY", "10"))
+    MAX_GROUP_VARS_DISPLAY = int(os.getenv("MAX_GROUP_VARS_DISPLAY", "5"))
     
     # Verification limits
-    VERIFICATION_PREVIEW_LINES = 30
+    VERIFICATION_PREVIEW_LINES = int(os.getenv("VERIFICATION_PREVIEW_LINES", "30"))
     
     # Tool output limits
-    TOOL_OUTPUT_PREVIEW_CHARS = 100
-    MAX_PLAN_STEPS = 10
-    
-    # Context extraction limits (to avoid token limit issues)
-    MAX_FILE_LINES_IN_CONTEXT = 50  # Maximum lines to show from a file
-    CONTEXT_LINES_BEFORE = 5  # Lines before the match
-    CONTEXT_LINES_AFTER = 10  # Lines after the match
-    MAX_CONTEXT_CHARS = 1500  # Maximum characters for context snippets
+    TOOL_OUTPUT_PREVIEW_CHARS = int(os.getenv("TOOL_OUTPUT_PREVIEW_CHARS", "100"))
+    MAX_PLAN_STEPS = int(os.getenv("MAX_PLAN_STEPS", "10"))
     
     # Display separator widths
-    SEPARATOR_WIDTH_STANDARD = 80
-    SEPARATOR_WIDTH_DIFF = 70
+    SEPARATOR_WIDTH_STANDARD = int(os.getenv("SEPARATOR_WIDTH_STANDARD", "80"))
+    SEPARATOR_WIDTH_DIFF = int(os.getenv("SEPARATOR_WIDTH_DIFF", "70"))
 
 # # Clone or update repository
 # def setup_repo():
@@ -198,26 +190,26 @@ def detect_modification_type(description: str) -> str:
     """Detect the type of modification based on description keywords."""
     description_lower = description.lower()
     
-    # Keywords for each type
-    feature_keywords = ['add', 'implement', 'create', 'new', 'support', 'introduce']
-    bugfix_keywords = ['fix', 'bug', 'issue', 'error', 'crash', 'problem', 'resolve']
-    chore_keywords = ['update', 'upgrade', 'refactor', 'clean', 'maintenance', 'reorganize']
-    hotfix_keywords = ['urgent', 'critical', 'security', 'hotfix', 'emergency']
-    docs_keywords = ['document', 'readme', 'docs', 'comment', 'documentation']
-    test_keywords = ['test', 'testing', 'spec', 'coverage']
+    # Keywords for each type - configurable via environment variables
+    feature_keywords = os.getenv('FEATURE_KEYWORDS', 'add,implement,create,new,support,introduce').split(',')
+    bugfix_keywords = os.getenv('BUGFIX_KEYWORDS', 'fix,bug,issue,error,crash,problem,resolve').split(',')
+    chore_keywords = os.getenv('CHORE_KEYWORDS', 'update,upgrade,refactor,clean,maintenance,reorganize').split(',')
+    hotfix_keywords = os.getenv('HOTFIX_KEYWORDS', 'urgent,critical,security,hotfix,emergency').split(',')
+    docs_keywords = os.getenv('DOCS_KEYWORDS', 'document,readme,docs,comment,documentation').split(',')
+    test_keywords = os.getenv('TEST_KEYWORDS', 'test,testing,spec,coverage').split(',')
     
     # Check for each type
-    if any(keyword in description_lower for keyword in hotfix_keywords):
+    if any(keyword.strip() in description_lower for keyword in hotfix_keywords):
         return 'hotfix'
-    elif any(keyword in description_lower for keyword in bugfix_keywords):
+    elif any(keyword.strip() in description_lower for keyword in bugfix_keywords):
         return 'bugfix'
-    elif any(keyword in description_lower for keyword in docs_keywords):
+    elif any(keyword.strip() in description_lower for keyword in docs_keywords):
         return 'docs'
-    elif any(keyword in description_lower for keyword in test_keywords):
+    elif any(keyword.strip() in description_lower for keyword in test_keywords):
         return 'test'
-    elif any(keyword in description_lower for keyword in chore_keywords):
+    elif any(keyword.strip() in description_lower for keyword in chore_keywords):
         return 'chore'
-    elif any(keyword in description_lower for keyword in feature_keywords):
+    elif any(keyword.strip() in description_lower for keyword in feature_keywords):
         return 'feature'
     else:
         return 'feature'  # Default to feature
@@ -239,6 +231,42 @@ def generate_branch_name(change_type: str, description: str) -> str:
     # Create branch name
     branch_name = f"{change_type}/{clean_desc}"
     return branch_name
+
+def should_ignore_directory(directory_path: Path, dir_name: str) -> bool:
+    """
+    Check if a directory should be ignored based on file count.
+    
+    Args:
+        directory_path: Path object to the directory to check
+        dir_name: Name of the directory (e.g., 'inventories' or 'host_vars')
+    
+    Returns:
+        True if the directory should be ignored, False otherwise
+    """
+    if not directory_path.exists() or not directory_path.is_dir():
+        return False
+    
+    try:
+        # Count only files (not directories)
+        file_count = sum(1 for item in directory_path.iterdir() if item.is_file())
+        
+        # Determine the limit based on directory type
+        if dir_name == 'inventories':
+            max_files = MAX_FILES_IN_INVENTORIES
+        elif dir_name == 'host_vars':
+            max_files = MAX_FILES_IN_HOST_VARS
+        else:
+            # Use the more restrictive limit as default
+            max_files = min(MAX_FILES_IN_INVENTORIES, MAX_FILES_IN_HOST_VARS)
+        
+        should_ignore = file_count > max_files
+        if should_ignore:
+            print_thinking(f"Ignoring {dir_name} directory: contains {file_count} files (max allowed: {max_files})")
+        
+        return should_ignore
+    except Exception as e:
+        print_thinking(f"Error checking {dir_name} directory: {e}")
+        return False
 
 def ask_branch_creation(modification_description: str) -> tuple:
     """Ask user if they want to create a new branch for modifications.
@@ -402,7 +430,7 @@ def find_relevant_files(query_description: str, file_pattern: str = "*.yml") -> 
     This is a lightweight operation that helps narrow down which files to read.
     
     Args:
-        query_description: Description of what you're looking for (e.g., 'web server configuration', 'database setup')
+        query_description: Description of what you're looking for (e.g., 'nginx configuration', 'database setup')
         file_pattern: File glob pattern to search (e.g., '*.yml', 'roles/*/tasks/*.yml')
     
     Returns:
@@ -481,7 +509,7 @@ def grep_search(pattern: str, file_pattern: str = "*", case_sensitive: bool = Fa
     with the same search term. intelligent_search will try naming variations automatically.
     
     Args:
-        pattern: Regex pattern to search for (e.g., 'ansible.builtin.*', 'name:.*service', etc.)
+        pattern: Regex pattern to search for (e.g., 'ansible.builtin.*', 'name:.*nginx', etc.)
         file_pattern: File glob pattern to search in (default: *, examples: '*.yml', '*.yaml', 'roles/**/tasks/*.yml')
         case_sensitive: Whether the search should be case-sensitive (default: False)
         max_results: Maximum number of results to return (default: 50)
@@ -491,10 +519,6 @@ def grep_search(pattern: str, file_pattern: str = "*", case_sensitive: bool = Fa
     
     NOTE: If you get "No matches found", IMMEDIATELY try intelligent_search(pattern, file_pattern)
     """
-    # Store search pattern globally for context extraction
-    global _LAST_SEARCH_TERM
-    _LAST_SEARCH_TERM = pattern
-    
     base_path = Path(REPO_LOCAL_PATH).resolve()
     results = []
     flags = 0 if case_sensitive else re.IGNORECASE
@@ -533,202 +557,27 @@ def grep_search(pattern: str, file_pattern: str = "*", case_sensitive: bool = Fa
         
         return "\n".join(results) + f"\n\nFound {len(_LAST_SEARCH_PATHS)} unique files. Call read_all_found_files() to read all of them."
     else:
-        return f"No matches found for pattern '{pattern}'."
-
-def extract_search_intent(user_query: str, llm) -> dict:
-    """Use LLM to extract search intent and parameters from natural language query.
-    
-    Args:
-        user_query: Natural language query from user
-        llm: Language model instance
-    
-    Returns:
-        Dictionary with extracted search parameters:
-        - search_term: What to search for
-        - file_pattern: Which files to search in
-        - intent: What user is trying to find (variable, role, task, file, configuration, etc.)
-        - context: Additional context about the search
-    """
-    intent_extraction_prompt = f"""You are an expert at understanding search queries for Ansible codebases.
-
-User Query: "{user_query}"
-
-Extract the following information from this query:
-
-1. SEARCH_TERM: The exact term/name the user wants to find (variable name, role name, task name, etc.)
-2. FILE_PATTERN: What type of files to search in (*.yml, *.yaml, tasks/*.yml, vars/*.yml, defaults/*.yml, etc.)
-3. INTENT: What the user is looking for. Choose ONE from:
-   - "variable" - looking for variable definitions or usage
-   - "role" - looking for role information
-   - "task" - looking for task definitions
-   - "handler" - looking for handlers
-   - "template" - looking for templates
-   - "configuration" - looking for configuration settings
-   - "playbook" - looking for playbook files
-   - "general" - general search or unclear intent
-
-IMPORTANT RULES:
-- For SEARCH_TERM: Extract the actual name/identifier, NOT the full sentence
-- For FILE_PATTERN: Use glob patterns (*.yml, vars/*.yml, tasks/**/*.yml, etc.)
-- Default FILE_PATTERN is "*.yml" if not specified
-- Be precise with the search term - remove words like "find", "search for", "where is", etc.
-
-Examples:
-Query: "Find the variable my_config_variable"
-SEARCH_TERM: my_config_variable
-FILE_PATTERN: *.yml
-INTENT: variable
-
-Query: "Where are handlers defined in the web role?"
-SEARCH_TERM: handlers
-FILE_PATTERN: handlers/*.yml
-INTENT: handler
-
-Query: "Search for security tasks"
-SEARCH_TERM: security
-FILE_PATTERN: tasks/*.yml
-INTENT: task
-
-Query: "Find timeout configuration"
-SEARCH_TERM: timeout
-FILE_PATTERN: *.yml
-INTENT: configuration
-
-Now extract from the user query. Respond ONLY with a JSON object (no markdown, no explanation):
-{{"search_term": "...", "file_pattern": "...", "intent": "..."}}"""
-
-    try:
-        response = llm.invoke([HumanMessage(content=intent_extraction_prompt)])
-        response_text = response.content.strip()
-        
-        # Remove markdown code blocks if present
-        if response_text.startswith('```'):
-            response_text = response_text.split('```')[1]
-            if response_text.startswith('json'):
-                response_text = response_text[4:]
-            response_text = response_text.strip()
-        
-        # Parse JSON
-        import json
-        extracted = json.loads(response_text)
-        
-        # Validate required fields
-        if 'search_term' not in extracted or not extracted['search_term']:
-            # Fallback: use the whole query as search term
-            extracted['search_term'] = user_query.replace('find', '').replace('search', '').replace('where', '').strip()
-        
-        if 'file_pattern' not in extracted:
-            extracted['file_pattern'] = "*.yml"
-        
-        if 'intent' not in extracted:
-            extracted['intent'] = "general"
-        
-        return extracted
-        
-    except Exception as e:
-        # Fallback: use simple heuristics
-        query_lower = user_query.lower()
-        
-        # Extract search term (simple heuristic)
-        search_term = user_query.replace('find', '').replace('search for', '').replace('where is', '').replace('locate', '').strip()
-        
-        # Determine file pattern based on keywords
-        file_pattern = "*.yml"
-        if 'task' in query_lower:
-            file_pattern = "tasks/*.yml"
-        elif 'handler' in query_lower:
-            file_pattern = "handlers/*.yml"
-        elif 'var' in query_lower or 'variable' in query_lower:
-            file_pattern = "vars/*.yml"
-        elif 'default' in query_lower:
-            file_pattern = "defaults/*.yml"
-        
-        # Determine intent
-        intent = "general"
-        if 'variable' in query_lower or 'var' in query_lower:
-            intent = "variable"
-        elif 'role' in query_lower:
-            intent = "role"
-        elif 'task' in query_lower:
-            intent = "task"
-        elif 'handler' in query_lower:
-            intent = "handler"
-        elif 'template' in query_lower:
-            intent = "template"
-        
-        return {
-            "search_term": search_term,
-            "file_pattern": file_pattern,
-            "intent": intent,
-            "fallback": True
-        }
+        output_no_match = []
+        output_no_match.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_no_match.append(f"NO MATCHES FOUND for pattern: '{pattern}' in {file_pattern}")
+        output_no_match.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_no_match.append("")
+        output_no_match.append("CRITICAL: This pattern does not exist in the repository.")
+        output_no_match.append("")
+        output_no_match.append("NEXT STEP: Immediately call intelligent_search() with the same term.")
+        output_no_match.append(f"  intelligent_search('{pattern.replace('.*', '').strip()}', '{file_pattern}')")
+        output_no_match.append("")
+        output_no_match.append("intelligent_search will try common naming variations automatically.")
+        output_no_match.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        return "\n".join(output_no_match)
 
 @tool
-def smart_search(user_query: str) -> str:
-    """RECOMMENDED: Natural language search that understands your intent!
-    
-    This is the PREFERRED search tool. Just describe what you're looking for in natural language,
-    and the system will understand your intent and extract the right search parameters.
-    
-    Examples:
-    - "Find the variable my_config_setting"
-    - "Where are security tasks defined?"
-    - "Search for timeout configuration"
-    - "Locate handler definitions in the web role"
-    - "Find all templates related to services"
-    
-    The system will:
-    1. Understand what you're searching for (variable, task, role, etc.)
-    2. Extract the actual search term
-    3. Determine which files to search in
-    4. Perform intelligent search with naming variations
-    
-    Args:
-        user_query: Natural language description of what you want to find
-    
-    Returns:
-        Search results with ABSOLUTE file paths. Call read_all_found_files() after this.
-    """
-    # Get LLM instance from global context
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    import os
-    
-    # Use configured LLM settings from environment
-    model_name = os.getenv("GEMINI_MODEL", os.getenv("LLM_MODEL", "gemini-1.5-flash"))
-    api_key = os.getenv("GOOGLE_API_KEY", os.getenv("LLM_API_KEY"))
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
-    
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=temperature,
-        convert_system_message_to_human=True
-    )
-    
-    # Extract intent and parameters using LLM
-    extracted = extract_search_intent(user_query, llm)
-    
-    search_term = extracted.get('search_term', '')
-    file_pattern = extracted.get('file_pattern', '*.yml')
-    intent = extracted.get('intent', 'general')
-    fallback = extracted.get('fallback', False)
-    
-    # Build context message
-    context_msg = f"\n[Smart Search] Understood your query:\n"
-    context_msg += f"  - Intent: {intent}\n"
-    context_msg += f"  - Searching for: '{search_term}'\n"
-    context_msg += f"  - In files: {file_pattern}\n"
-    if fallback:
-        context_msg += f"  - Note: Using fallback heuristics (LLM extraction failed)\n"
-    context_msg += f"\nExecuting intelligent search with naming variations...\n\n"
-    
-    # Call the core search implementation (not the tool wrapper)
-    results = _perform_intelligent_search(search_term, file_pattern)
-    
-    return context_msg + results
-
-def _perform_intelligent_search(search_term: str, file_pattern: str = "*.yml", max_results_per_pattern: int = 10) -> str:
-    """Core implementation of intelligent search. This is called by both intelligent_search and smart_search tools.
+def intelligent_search(search_term: str, file_pattern: str = "*.yml", max_results_per_pattern: int = 10) -> str:
+    """Intelligent search that tries multiple naming pattern variations automatically.
+    Use this when a simple search fails - it handles common naming variations like:
+    - abc_def_ghi vs abcdef_ghi
+    - snake_case vs camelCase
+    - with/without prefixes or suffixes
     
     Args:
         search_term: The term to search for (e.g., 'abc_def_ghi')
@@ -736,12 +585,8 @@ def _perform_intelligent_search(search_term: str, file_pattern: str = "*.yml", m
         max_results_per_pattern: Maximum results to show per pattern variation (default: 10)
     
     Returns:
-        Formatted search results with ABSOLUTE file paths
+        Grouped results with ABSOLUTE file paths to prevent hallucination. Use these EXACT paths with read_file().
     """
-    # Store search term globally for context extraction
-    global _LAST_SEARCH_TERM
-    _LAST_SEARCH_TERM = search_term
-    
     base_path = Path(REPO_LOCAL_PATH).resolve()
     
     # Generate naming pattern variations
@@ -834,7 +679,28 @@ def _perform_intelligent_search(search_term: str, file_pattern: str = "*.yml", m
     
     # Format output
     if not results_by_variation:
-        return f"No matches found for '{search_term}' or any of its variations.\n\nTried variations:\n" + "\n".join(f"  - {name}: {pattern}" for name, pattern in variations)
+        output_not_found = []
+        output_not_found.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_not_found.append("!" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_not_found.append(f"NO MATCHES FOUND FOR: '{search_term}'")
+        output_not_found.append("!" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_not_found.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_not_found.append("")
+        output_not_found.append(f"The term '{search_term}' does not exist in any {file_pattern} files in this repository.")
+        output_not_found.append("This means:")
+        output_not_found.append(f"  1. No file contains the variable/setting '{search_term}'")
+        output_not_found.append("  2. You CANNOT suggest modifying a file for this term")
+        output_not_found.append("  3. The file/variable does NOT exist - tell the user this")
+        output_not_found.append("")
+        output_not_found.append("Tried these variations:")
+        for name, pattern in variations:
+            output_not_found.append(f"  - {name}: {pattern}")
+        output_not_found.append("")
+        output_not_found.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        output_not_found.append("CRITICAL: Do NOT hallucinate file paths in your answer!")
+        output_not_found.append("Tell the user: 'This variable/file does not exist in the repository.'")
+        output_not_found.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
+        return "\n".join(output_not_found)
     
     output = [f"INTELLIGENT SEARCH RESULTS for '{search_term}'"]
     output.append(f"Found {total_matches} total matches across {len(results_by_variation)} pattern variations.\n")
@@ -886,130 +752,24 @@ def _perform_intelligent_search(search_term: str, file_pattern: str = "*.yml", m
     return "\n".join(output)
 
 @tool
-def intelligent_search(search_term: str, file_pattern: str = "*.yml", max_results_per_pattern: int = 10) -> str:
-    """Intelligent search that tries multiple naming pattern variations automatically.
-    Use this when a simple search fails - it handles common naming variations like:
-    - abc_def_ghi vs abcdef_ghi
-    - snake_case vs camelCase
-    - with/without prefixes or suffixes
-    
-    RECOMMENDATION: Use smart_search() instead for natural language queries.
-    This tool requires explicit parameters.
-    
-    Args:
-        search_term: The term to search for (e.g., 'abc_def_ghi')
-        file_pattern: File glob pattern to search in (default: '*.yml')
-        max_results_per_pattern: Maximum results to show per pattern variation (default: 10)
-    
-    Returns:
-        Grouped results with ABSOLUTE file paths to prevent hallucination. Use these EXACT paths with read_file().
-    """
-    return _perform_intelligent_search(search_term, file_pattern, max_results_per_pattern)
-
-def extract_relevant_context(content: str, search_terms: list = None, max_lines: int = None) -> str:
-    """Extract relevant context from file content to avoid token limit issues.
-    
-    Args:
-        content: Full file content
-        search_terms: List of terms to search for (optional)
-        max_lines: Maximum number of lines to return (default: Config.MAX_FILE_LINES_IN_CONTEXT)
-    
-    Returns:
-        Relevant excerpt from the file with context
-    """
-    if max_lines is None:
-        max_lines = Config.MAX_FILE_LINES_IN_CONTEXT
-    
-    lines = content.split('\n')
-    total_lines = len(lines)
-    
-    # If file is small enough, return full content
-    if total_lines <= max_lines:
-        return content
-    
-    # If we have search terms, find relevant sections
-    if search_terms:
-        relevant_sections = []
-        seen_line_numbers = set()
-        
-        for term in search_terms:
-            term_lower = term.lower()
-            for i, line in enumerate(lines):
-                if term_lower in line.lower():
-                    # Extract context window around this line
-                    start = max(0, i - Config.CONTEXT_LINES_BEFORE)
-                    end = min(total_lines, i + Config.CONTEXT_LINES_AFTER + 1)
-                    
-                    # Avoid duplicate sections
-                    if i not in seen_line_numbers:
-                        section_lines = []
-                        if start > 0:
-                            section_lines.append(f"... (lines 1-{start} omitted) ...")
-                        
-                        for line_num in range(start, end):
-                            seen_line_numbers.add(line_num)
-                            marker = ">>>" if line_num == i else "   "
-                            section_lines.append(f"{marker} {line_num + 1:4d}| {lines[line_num]}")
-                        
-                        if end < total_lines:
-                            section_lines.append(f"... (lines {end + 1}-{total_lines} omitted) ...")
-                        
-                        relevant_sections.append('\n'.join(section_lines))
-        
-        if relevant_sections:
-            result = '\n\n'.join(relevant_sections)
-            # If still too long, truncate
-            if len(result) > Config.MAX_CONTEXT_CHARS:
-                return result[:Config.MAX_CONTEXT_CHARS] + f"\n... (truncated, {len(result) - Config.MAX_CONTEXT_CHARS} more chars)"
-            return result
-    
-    # No search terms or no matches found - show beginning and end
-    preview_lines = max_lines // 2
-    beginning = '\n'.join(lines[:preview_lines])
-    ending = '\n'.join(lines[-preview_lines:])
-    
-    return f"""{beginning}
-
-... ({total_lines - max_lines} lines omitted) ...
-
-{ending}"""
-
-@tool
 def read_all_found_files() -> str:
     """Read all files found by the last intelligent_search or grep_search call.
-    This automatically reads every file that was found, showing ONLY RELEVANT CONTEXT
-    to avoid token limit issues.
+    This automatically reads every file that was found, so you can review their contents
+    and decide which one to modify.
     
     IMPORTANT: Call this immediately after intelligent_search to see the content of all found files.
-    Only relevant sections (around search terms) are shown to save tokens.
     
     Returns:
-        Relevant excerpts from files with clear separators between them.
+        Combined content of all files with clear separators between them.
     """
-    global _LAST_SEARCH_PATHS, _LAST_SEARCH_TERM
+    global _LAST_SEARCH_PATHS
     
     if not _LAST_SEARCH_PATHS:
         return "No search results available. Call intelligent_search or grep_search first."
     
-    # Prepare search terms for context extraction
-    search_terms = []
-    if _LAST_SEARCH_TERM:
-        # Generate variations of the search term for better context matching
-        base_term = _LAST_SEARCH_TERM
-        search_terms.append(base_term)
-        # Add common variations
-        search_terms.append(base_term.replace('_', ''))  # Remove underscores
-        search_terms.append(base_term.replace('-', '_'))  # Hyphens to underscores
-        # Remove duplicates
-        search_terms = list(set(search_terms))
-    
     output = []
     output.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
-    output.append(f"READING {len(_LAST_SEARCH_PATHS)} FILE(S) - SHOWING RELEVANT CONTEXT ONLY")
-    output.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
-    if search_terms:
-        output.append(f"Context extracted around: {', '.join(search_terms[:3])}")
-        output.append("Lines marked with '>>>' contain matches")
+    output.append(f"READING ALL {len(_LAST_SEARCH_PATHS)} FILES FOUND IN LAST SEARCH")
     output.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
     
     for file_path in _LAST_SEARCH_PATHS:
@@ -1032,22 +792,21 @@ def read_all_found_files() -> str:
                 content = f.read()
                 line_count = content.count('\n') + 1
                 
-                # Use smart context extraction to save tokens
-                relevant_content = extract_relevant_context(
-                    content,
-                    search_terms=search_terms if search_terms else None,
-                    max_lines=Config.MAX_FILE_LINES_IN_CONTEXT
-                )
-                
-                output.append(f"\nRelevant content ({line_count} total lines):\n")
-                output.append(relevant_content)
+                # Show full content for small files, preview for large files
+                if line_count > Config.LARGE_FILE_LINE_THRESHOLD:
+                    preview = '\n'.join(content.split('\n')[:Config.LARGE_FILE_PREVIEW_LINES])
+                    output.append(f"\nContent ({line_count} lines, showing first {Config.LARGE_FILE_PREVIEW_LINES}):\n")
+                    output.append(preview)
+                    output.append(f"\n... ({line_count - Config.LARGE_FILE_PREVIEW_LINES} more lines)")
+                else:
+                    output.append(f"\nContent ({line_count} lines):\n")
+                    output.append(content)
         except Exception as e:
             output.append(f"ERROR reading file: {str(e)}")
     
     output.append("\n" + "=" * Config.SEPARATOR_WIDTH_STANDARD)
-    output.append("NOTE: Only relevant sections shown to conserve tokens.")
-    output.append("Sections around search matches are highlighted with '>>>'.")
-    output.append("Use create_modification_plan with the ABSOLUTE path of your chosen file.")
+    output.append("RECOMMENDATION: Review the files above and select which one to modify.")
+    output.append("Then use create_modification_plan with the ABSOLUTE path of your chosen file.")
     output.append("=" * Config.SEPARATOR_WIDTH_STANDARD)
     
     return "\n".join(output)
@@ -1101,34 +860,55 @@ def analyze_ansible_structure() -> str:
                 discovered_roles.append(role_rel_path)
                 
                 # Check for standard role structure
-                for component in ["tasks", "handlers", "templates", "files", "vars", "defaults", "meta"]:
-                    component_path = role_dir / component
+                role_comp_list = os.getenv('ROLE_COMPONENTS', 'tasks,handlers,defaults,vars,meta,templates,files').split(',')
+                for component in role_comp_list:
+                    component_path = role_dir / component.strip()
                     if component_path.exists():
-                        role_info["components"].append(component)
+                        role_info["components"].append(component.strip())
                 
                 analysis["roles"].append(role_info)
     
-    # Also check if current directory itself is a role
+    # Also check for roles in current directory (which might be a role itself)
     # Check if current directory has role structure
-    role_components = ["tasks", "handlers", "defaults", "vars", "meta", "templates", "files"]
-    if any((base_path / comp).exists() for comp in role_components):
+    role_components = os.getenv('ROLE_COMPONENTS', 'tasks,handlers,defaults,vars,meta,templates,files').split(',')
+    if any((base_path / comp.strip()).exists() for comp in role_components):
         # This is a role directory
         discovered_roles.append(".")
     
     # Store discovered role paths globally
     _DISCOVERED_ROLE_PATHS = discovered_roles
     
-    # Find inventory files
-    for pattern in ["inventory/*", "hosts", "inventory.ini", "inventory.yml"]:
-        for file_path in base_path.glob(pattern):
-            if file_path.is_file():
-                rel_path = file_path.relative_to(REPO_LOCAL_PATH)
-                analysis["inventory_files"].append(str(rel_path))
+    # Find inventory files (check if inventory/inventories directories should be ignored)
+    inventory_dir = base_path / "inventory"
+    inventories_dir = base_path / "inventories"
     
-    # Find group_vars and host_vars
-    for var_type in ["group_vars", "host_vars"]:
+    should_skip_inventory = False
+    if inventory_dir.exists() and should_ignore_directory(inventory_dir, "inventories"):
+        print_thinking("Skipping inventory directory due to file count limit")
+        should_skip_inventory = True
+    if inventories_dir.exists() and should_ignore_directory(inventories_dir, "inventories"):
+        print_thinking("Skipping inventories directory due to file count limit")
+        should_skip_inventory = True
+    
+    if not should_skip_inventory:
+        inventory_patterns = os.getenv('INVENTORY_PATTERNS', 'inventory/*,inventories/*,hosts,inventory.ini,inventory.yml').split(',')
+        for pattern in inventory_patterns:
+            for file_path in base_path.glob(pattern.strip()):
+                if file_path.is_file():
+                    rel_path = file_path.relative_to(REPO_LOCAL_PATH)
+                    analysis["inventory_files"].append(str(rel_path))
+    
+    # Find group_vars and host_vars (check if they should be ignored)
+    skipped_var_types = []
+    var_types = os.getenv('VAR_TYPES', 'group_vars,host_vars').split(',')
+    for var_type in var_types:
+        var_type = var_type.strip()
         var_path = base_path / var_type
         if var_path.exists():
+            if should_ignore_directory(var_path, var_type):
+                print_thinking(f"Skipping {var_type} directory due to file count limit")
+                skipped_var_types.append(var_type)
+                continue
             for var_file in var_path.rglob("*.yml"):
                 rel_path = var_file.relative_to(REPO_LOCAL_PATH)
                 analysis[var_type].append(str(rel_path))
@@ -1161,8 +941,13 @@ def analyze_ansible_structure() -> str:
     
     if analysis["inventory_files"]:
         output.append(f"Inventory Files ({len(analysis['inventory_files'])}):")
-        for inv in analysis["inventory_files"]:
+        for inv in analysis["inventory_files"][:Config.MAX_ITEMS_DISPLAY]:
             output.append(f"  - {inv}")
+        if len(analysis["inventory_files"]) > Config.MAX_ITEMS_DISPLAY:
+            output.append(f"  ... and {len(analysis['inventory_files']) - Config.MAX_ITEMS_DISPLAY} more")
+        output.append("")
+    elif should_skip_inventory:
+        output.append("Inventory Files: Skipped (directory contains too many files)")
         output.append("")
     
     if analysis["group_vars"]:
@@ -1171,6 +956,20 @@ def analyze_ansible_structure() -> str:
             output.append(f"  - {gv}")
         if len(analysis["group_vars"]) > Config.MAX_GROUP_VARS_DISPLAY:
             output.append(f"  ... and {len(analysis['group_vars']) - Config.MAX_GROUP_VARS_DISPLAY} more")
+        output.append("")
+    elif "group_vars" in skipped_var_types:
+        output.append("Group Variables: Skipped (directory contains too many files)")
+        output.append("")
+    
+    if analysis["host_vars"]:
+        output.append(f"Host Variables ({len(analysis['host_vars'])}):")
+        for hv in analysis["host_vars"][:Config.MAX_GROUP_VARS_DISPLAY]:
+            output.append(f"  - {hv}")
+        if len(analysis["host_vars"]) > Config.MAX_GROUP_VARS_DISPLAY:
+            output.append(f"  ... and {len(analysis['host_vars']) - Config.MAX_GROUP_VARS_DISPLAY} more")
+        output.append("")
+    elif "host_vars" in skipped_var_types:
+        output.append("Host Variables: Skipped (directory contains too many files)")
         output.append("")
     
     return "\n".join(output) if any(analysis.values()) else "No Ansible structure detected in the repository."
@@ -1212,7 +1011,7 @@ REQUIRED ACTION:
 3. Call apply_file_edit again with the ABSOLUTE path
 
 Example of correct absolute path:
-  /absolute/path/to/repository/vars/main.yml
+  /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml
 """
     
     # Check if file exists
@@ -1262,14 +1061,11 @@ ONLY use paths that were discovered by intelligent_search or grep_search!
                 actual_content = f.read()
             
             if old_string not in actual_content:
-                # Extract relevant context using smart context extraction
-                # Try to find similar content to what they were looking for
-                search_words = [word for word in old_string.split() if len(word) > 3][:5]
-                relevant_context = extract_relevant_context(
-                    actual_content,
-                    search_terms=search_words,
-                    max_lines=Config.MAX_FILE_LINES_IN_CONTEXT
-                )
+                # Show the actual file content (no truncation for small files)
+                if len(actual_content) < 2000:
+                    content_display = actual_content
+                else:
+                    content_display = actual_content[:2000] + f"\n\n... ({len(actual_content) - 2000} more characters)"
                 
                 return f"""
 ERROR: CONTENT HALLUCINATION DETECTED!
@@ -1279,16 +1075,16 @@ The old_string you provided does NOT exist in the file!
 File: {file_path}
 
 Your old_string:
-{old_string[:500]}{"..." if len(old_string) > 500 else ""}
+{old_string}
 
-RELEVANT SECTIONS from actual file (lines with '>>>' show potential matches):
-{relevant_context}
+ACTUAL file content:
+{content_display}
 
 IMMEDIATE RETRY REQUIRED:
 You MUST retry apply_file_edit NOW in THIS SAME STEP with the correct content!
 
-1. Look at the RELEVANT SECTIONS shown above
-2. Find the EXACT lines you want to modify (look for lines marked with '>>>')
+1. Look at the ACTUAL file content shown above
+2. Find the EXACT lines you want to modify
 3. Copy those EXACT lines (with correct spacing, quotes, indentation) as old_string
 4. Create new_string with your modification
 5. Call apply_file_edit AGAIN with the correct old_string and new_string
@@ -1361,12 +1157,12 @@ REQUIRED ACTION:
 4. Call create_modification_plan again with the ABSOLUTE path
 
 Example of correct absolute path:
-  /absolute/path/to/repository/vars/main.yml
+  /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml
 
 NEVER use paths like:
   - roles/something/vars/main.yml
   - vars/main.yml
-  - relative/path/to/file.yml
+  - /usr/local/google/home/...  (this is not your system!)
 """
         
         # Check 2: File must exist
@@ -1429,14 +1225,11 @@ ONLY use paths that were discovered by intelligent_search or grep_search!
                     actual_content = f.read()
                 
                 if old_string not in actual_content:
-                    # Extract relevant context using smart context extraction
-                    # Try to find similar content to what they were looking for
-                    search_words = [word for word in old_string.split() if len(word) > 3][:5]
-                    relevant_context = extract_relevant_context(
-                        actual_content,
-                        search_terms=search_words,
-                        max_lines=Config.MAX_FILE_LINES_IN_CONTEXT
-                    )
+                    # Show the actual file content (no truncation for small files)
+                    if len(actual_content) < 2000:
+                        content_display = actual_content
+                    else:
+                        content_display = actual_content[:2000] + f"\n\n... ({len(actual_content) - 2000} more characters)"
                     
                     return f"""
 ERROR: CONTENT HALLUCINATION DETECTED!
@@ -1446,16 +1239,16 @@ The old_string you provided does NOT exist in the file!
 File: {file_path}
 
 Your old_string:
-{old_string[:500]}{"..." if len(old_string) > 500 else ""}
+{old_string}
 
-RELEVANT SECTIONS from actual file (lines with '>>>' show potential matches):
-{relevant_context}
+ACTUAL file content:
+{content_display}
 
 IMMEDIATE RETRY REQUIRED:
 You MUST retry create_modification_plan NOW in THIS SAME STEP with the correct content!
 
-1. Look at the RELEVANT SECTIONS shown above
-2. Find the EXACT lines you want to modify (look for lines marked with '>>>')
+1. Look at the ACTUAL file content shown above
+2. Find the EXACT lines you want to modify
 3. Copy those EXACT lines (with correct spacing, quotes, indentation) as old_string
 4. Create new_string with your modification
 5. Call create_modification_plan AGAIN with the correct old_string and new_string
@@ -2154,15 +1947,15 @@ CRITICAL ANTI-HALLUCINATION RULES (MANDATORY - FOLLOW EXACTLY):
 
 Rule 1: ALWAYS USE ABSOLUTE PATHS FROM SEARCH TOOLS
   - grep_search and intelligent_search return ABSOLUTE paths
-  - ABSOLUTE paths start with / (e.g., /full/path/to/project/file.yml)
+  - ABSOLUTE paths start with / (e.g., /Users/user/project/file.yml)
   - NEVER modify, shorten, or add to these absolute paths
   - COPY the EXACT absolute path from search results
 
 Rule 2: EXTRACT ABSOLUTE PATHS FROM SEARCH RESULTS
   - Search results format: '/absolute/path/to/file.yml:LINE_NUMBER: content'
   - The file path is EVERYTHING before the FIRST colon
-  - Example: '/absolute/path/repository/vars/main.yml:4: content' 
-    → file path is '/absolute/path/repository/vars/main.yml'
+  - Example: '/Users/user/repo_name/vars/main.yml:4: content' 
+    → file path is '/Users/user/repo_name/vars/main.yml'
   - NEVER truncate or modify the path
 
 Rule 3: USE ABSOLUTE PATHS EXACTLY AS SHOWN
@@ -2182,7 +1975,7 @@ Rule 5: NEVER GUESS OR CONSTRUCT PATHS
   - Do NOT assume directory structure
   - Do NOT construct paths like 'roles/NAME/vars/main.yml'
   - ONLY use absolute paths from search tool output
-  - If search shows /absolute/path/vars/main.yml, use that EXACTLY
+  - If search shows /Users/.../vars/main.yml, use that EXACTLY
 
 Rule 6: VERIFICATION LOOP
   - Extract absolute path (everything before first colon)
@@ -2224,25 +2017,25 @@ CRITICAL: Before calling read_file, you MUST:
 
 EXAMPLE (FOLLOW THIS PATTERN):
 If intelligent_search shows:
-  >>> /absolute/path/to/repository/vars/main.yml <<<
+  >>> /Users/user/folder_name/repo_name/vars/main.yml <<<
 Then you MUST call:
-  read_file('/absolute/path/to/repository/vars/main.yml')
+  read_file('/Users/user/folder_name/repo_name/vars/main.yml')
 NOT:
   read_file('vars/main.yml')  [WRONG - truncated absolute path]
-  read_file('roles/some-role/vars/main.yml')  [WRONG - hallucinated path]
-  read_file('/partial/path/vars/main.yml')  [WRONG - removed part of path]
+  read_file('roles/repo_name/vars/main.yml')  [WRONG - hallucinated path]
+  read_file('/Users/user/repo_name/vars/main.yml')  [WRONG - removed part of path]
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 STOP! READ THIS BEFORE EVERY read_file() CALL:
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 When you see intelligent_search results showing:
-  >>> /absolute/path/to/your/repository/vars/main.yml <<<
+  >>> /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml <<<
 
 You MUST use that EXACT path:
-  CORRECT: read_file('/absolute/path/to/your/repository/vars/main.yml')
-  WRONG:   read_file('roles/some-role/vars/main.yml')
-  WRONG:   read_file('vars/main.yml')
+  ✓ CORRECT: read_file('/Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml')
+  ✗ WRONG:   read_file('roles/repo_name/vars/main.yml')
+  ✗ WRONG:   read_file('vars/main.yml')
 
 NEVER construct paths like 'roles/something/vars/file.yml'
 NEVER use relative paths
@@ -2257,26 +2050,44 @@ Ansible Tools:
 - find_relevant_files: Find relevant files by keywords
 - get_file_summary: Preview file without full read
 - list_files: List directory contents
-- smart_search: **RECOMMENDED** Natural language search with intent understanding (just describe what you want!)
 - grep_search: Regex search (returns ABSOLUTE paths in results)
 - intelligent_search: Smart search that tries naming variations (returns ABSOLUTE paths - use when grep_search finds nothing)
-- read_all_found_files: Automatically reads ALL files from last search (use this after any search tool)
+- read_all_found_files: Automatically reads ALL files from last search (use this after intelligent_search instead of manually calling read_file)
 - search_in_files: Simple text search (returns matching lines only)
 - read_file: Read file using ABSOLUTE path from search results (paths start with /)
 - verify_modification: MANDATORY tool to verify changes after execution (enables retry loop)
 - analyze_role_structure: Analyze role (CRITICAL: MUST call analyze_ansible_structure first to discover role paths)
 
-CRITICAL SEARCH STRATEGY (UPDATED - RECOMMENDED):
-NEW PREFERRED METHOD - Use smart_search for natural language:
+CRITICAL FINAL ANSWER RULES (PREVENTS HALLUCINATION):
 
-Option A (RECOMMENDED): Natural Language Search
-1. Use smart_search("your natural language query")
-   - Example: smart_search("Find the variable my_config_variable")
-   - Example: smart_search("Where are security tasks?")
-   - The system will understand your intent and extract search parameters automatically
-2. After smart_search succeeds → IMMEDIATELY call read_all_found_files()
+Rule 1: FINAL ANSWER MUST ONLY USE DISCOVERED FILES
+  - When providing the final answer to the user, ONLY mention files that were actually found by search tools
+  - NEVER suggest modifying files like 'roles/xyz/vars/main.yml' unless you have SEEN this file in search results
+  - If you haven't found a specific file, DO NOT suggest it exists
 
-Option B (Traditional): Explicit Parameter Search  
+Rule 2: FINAL ANSWER PATH FORMAT
+  - In your final answer, you MAY use relative paths for clarity (e.g., "modify roles/hpe/vars/main.yml")
+  - BUT you must FIRST verify this file exists by seeing it in search results
+  - If the file doesn't exist in search results, state: "The file does not exist. You need to create it first."
+
+Rule 3: VALIDATE BEFORE SUGGESTING
+  - Before suggesting to modify a file in your final answer, check your search results
+  - If grep_search or intelligent_search didn't find the file → it doesn't exist
+  - Don't assume standard Ansible structure (like vars/main.yml) exists unless you've seen it
+
+Rule 4: BE EXPLICIT ABOUT MISSING FILES
+  - If user asks to modify something and the expected file doesn't exist, say so clearly
+  - Example: "The role 'hpe' exists but doesn't have a vars/main.yml file. You'll need to create this file first."
+  - Never pretend a file exists when it wasn't found in searches
+
+Rule 5: USE ACTUAL DISCOVERED PATHS IN TOOL CALLS
+  - Even though final answer can use relative paths for readability
+  - ALL tool calls (read_file, create_modification_plan) MUST use absolute paths from search
+  - Never mix these up
+
+CRITICAL SEARCH STRATEGY (MANDATORY):
+When searching for variables/config names, follow this EXACT sequence:
+
 1. First: Try grep_search(pattern, file_pattern)
 2. If "No matches found" → IMMEDIATELY call intelligent_search(pattern, file_pattern)
 3. After intelligent_search succeeds → IMMEDIATELY call read_all_found_files()
@@ -2359,11 +2170,11 @@ CRITICAL ANTI-CONTENT-HALLUCINATION RULES:
 
 THE APPROVAL WORKFLOW:
 - create_modification_plan: Prepares surgical edit (NO user interaction) - USE ABSOLUTE PATHS
-- execute_modification_plan: Shows diff, asks for branch, requests approval, then executes
+- execute_modification_plan: Shows diff → asks for branch → requests approval → executes
 
 CRITICAL: When creating modification plan, use ABSOLUTE path from search results!
-Example: file_path='/absolute/path/to/repository/vars/main.yml'
-NOT: file_path='roles/repository/vars/main.yml' [WRONG]
+Example: file_path='/Users/user/folder_name/repo_name/vars/main.yml'
+NOT: file_path='roles/repo_name/vars/main.yml' [WRONG]
 NOT: file_path='vars/main.yml' [WRONG]
 
 YOU MUST CALL BOTH TOOLS IN SEQUENCE:
@@ -2389,8 +2200,8 @@ CRITICAL WORKFLOW AFTER intelligent_search (MANDATORY):
 
 Step 1: intelligent_search finds files and shows:
 ```
->>> /absolute/path/to/repository/vars/main.yml <<<
->>> /absolute/path/to/repository/tasks/main.yml <<<
+>>> /Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml <<<
+>>> /Users/user/folder_name_1/folder_name_2/repo_name/tasks/main.yml <<<
 ```
 
 Step 2: IMMEDIATELY call read_all_found_files()
@@ -2400,9 +2211,9 @@ Step 2: IMMEDIATELY call read_all_found_files()
 - Decide which file to modify based on actual content
 
 Step 3: Create modification plan with ABSOLUTE path from file listing
-CORRECT: create_modification_plan(file_path='/absolute/path/to/repository/vars/main.yml', ...)
-WRONG:   create_modification_plan(file_path='roles/repository/vars/main.yml', ...)
-WRONG:   create_modification_plan(file_path='vars/main.yml', ...)
+✓ CORRECT: create_modification_plan(file_path='/Users/user/folder_name_1/folder_name_2/repo_name/vars/main.yml', ...)
+✗ WRONG:   create_modification_plan(file_path='roles/repo_name/vars/main.yml', ...)
+✗ WRONG:   create_modification_plan(file_path='vars/main.yml', ...)
 
 The path starts with / and contains the full directory structure. Use it EXACTLY as shown.
 
@@ -2419,7 +2230,7 @@ RULE #2: TWO-STEP WORKFLOW (both tools required)
    b) execute_modification_plan (shows diff, requests approval, executes)
 
 RULE #3: ALWAYS USE ABSOLUTE PATHS FROM SEARCH RESULTS
-   - intelligent_search shows: >>> /absolute/path/repository/vars/main.yml <<<
+   - intelligent_search shows: >>> /Users/.../repo_name/vars/main.yml <<<
    - Extract that EXACT path and use it with read_file() and create_modification_plan()
    - NEVER construct paths like 'roles/something/vars/main.yml'
    - NEVER use relative paths like 'vars/main.yml'
@@ -2443,6 +2254,35 @@ Git workflow:
 - Users can create feature/bugfix/chore/hotfix branches for modifications
 - Branch creation is optional - users can work on current branch if preferred
 
+FINAL ANSWER VALIDATION (CRITICAL - PREVENTS HALLUCINATION):
+
+Before providing your final answer to the user:
+
+1. CHECK YOUR SEARCH RESULTS
+   - Review what files were actually found by grep_search or intelligent_search
+   - Only mention files that were ACTUALLY discovered
+   - If you didn't find a file, don't claim it exists
+
+2. VERIFY FILE EXISTENCE
+   - If suggesting to modify "roles/xyz/vars/main.yml", verify you saw this exact file in search results
+   - If the file wasn't found → tell the user "This file doesn't exist. You need to create it first."
+   - Never assume standard Ansible files exist without verification
+
+3. USE DISCOVERED PATHS ONLY
+   - In your final answer, only reference files that appeared in your search/read operations
+   - If you searched for a file and got "No matches found" → that file does NOT exist
+   - Don't hallucinate paths based on Ansible conventions
+
+4. BE HONEST ABOUT MISSING FILES
+   - If the expected file is missing, explicitly state this
+   - Example: "The hpe role exists but does not have a vars/main.yml file yet. You'll need to create this file first at [absolute_path]/roles/hpe/vars/main.yml"
+   - Provide the absolute path where the file SHOULD be created
+
+5. FINAL ANSWER FORMAT FOR MODIFICATIONS
+   - If file exists: "To modify X, edit the file at [path] by adding [change]"
+   - If file doesn't exist: "The file [path] does not exist. You need to create it first with the following content: [content]"
+   - Always base this on actual search results, not assumptions
+
 When you have enough information, provide your answer."""
 
 # State definition for Chain of Thought agent
@@ -2460,7 +2300,6 @@ TOOLS = [
     find_relevant_files,
     get_file_summary,
     list_files,
-    smart_search,  # RECOMMENDED: Natural language search with intent understanding
     grep_search,
     intelligent_search,
     read_all_found_files,
@@ -2493,15 +2332,10 @@ def create_ansible_agent():
     # )
 
     # Configure LLM with Google Gemini
-    # Use configured LLM settings from environment
-    model_name = os.getenv("GEMINI_MODEL", os.getenv("LLM_MODEL", "gemini-1.5-flash"))
-    api_key = os.getenv("GOOGLE_API_KEY", os.getenv("LLM_API_KEY"))
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-    
     llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=temperature,
+        model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        temperature=0.2,
         convert_system_message_to_human=True
     )
     
@@ -2693,23 +2527,14 @@ DO NOT construct, generate, or guess role paths. ONLY use role paths from the li
         # Get file content from previous steps if read_all_found_files was called
         file_content_context = ""
         for result in state['step_results'][-5:]:
-            result_str = str(result)
-            if "FILE:" in result_str and "=" * 80 in result_str:
+            if "FILE:" in str(result) and "=" * 80 in str(result):
                 # This looks like output from read_all_found_files
-                # Extract only a reasonable amount (already optimized by read_all_found_files)
-                # Limit to MAX_CONTEXT_CHARS to avoid token overflow
-                if len(result_str) > Config.MAX_CONTEXT_CHARS:
-                    content_preview = result_str[:Config.MAX_CONTEXT_CHARS] + f"\n\n... (context truncated, {len(result_str) - Config.MAX_CONTEXT_CHARS} more chars)"
-                else:
-                    content_preview = result_str
-                
                 file_content_context = f"""
 
-ACTUAL FILE CONTENT FROM PREVIOUS STEP (relevant sections only):
-{content_preview}
+ACTUAL FILE CONTENT FROM PREVIOUS STEP:
+{str(result)[:2000]}
 
 CRITICAL: Use the EXACT content shown above when creating modifications!
-Lines marked with '>>>' show matches to your search.
 DO NOT generate or guess file content - COPY from the output above!
 """
                 break
@@ -2941,9 +2766,23 @@ Steps Executed:
 {discovered_paths_info}
 {discovered_roles_info}
 
+CRITICAL FINAL ANSWER VALIDATION CHECKLIST:
+
+Before providing your answer, verify:
+1. ✓ Did you search for the file/variable mentioned?
+2. ✓ Was the file ACTUALLY found in search results?
+3. ✓ If NOT found → Tell user the file doesn't exist (don't suggest modifying it)
+4. ✓ If found → Use the EXACT path from discovered paths list above
+5. ✓ Never mention paths like 'roles/xyz/vars/main.yml' unless you SAW this file in search results
+
+ANSWER FORMAT:
+- If file exists: "To modify X, edit [exact_path_from_discovered_list] by [change]"
+- If file NOT found: "The file [path] does not exist in this repository. You need to create it first."
+- Always check discovered paths list before mentioning any file
+
 Provide a clear, brief answer focusing only on what the user asked.
 
-If mentioning file paths or role paths, use ONLY the discovered paths/roles listed above - DO NOT hallucinate paths.""")
+REMEMBER: Use ONLY discovered paths/roles listed above - DO NOT hallucinate or assume paths exist.""")
         
         response = llm.invoke([final_prompt])
         

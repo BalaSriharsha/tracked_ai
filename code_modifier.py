@@ -14,6 +14,7 @@ from datetime import datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
+# from pyvegas.langx.llm import VegasChatLLM
 
 @dataclass
 class FileModification:
@@ -66,6 +67,10 @@ class CodeModifierAgent:
         self.repo_path = Path(repo_path)
         self.rag_query_engine = rag_query_engine
         self.modifications: List[FileModification] = []
+        
+        # self.llm = VegasChatLLM(
+        #     prompt_id = "ANSIBLE_AGENT_PROMPT"
+        # )
         
         # Setup LLM
         llm_config = llm_config or {}
